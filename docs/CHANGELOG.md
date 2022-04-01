@@ -14,7 +14,15 @@ Entries inside each section should be ordered by type:
 
 ## Catalog, Lambdas
 !-->
+
+# unreleased - YYYY-MM-DD
+
+## CLI
+* [Changed] Switch from a regular SHA256 checksum to a hash list to match S3's built-in checksums ([#2782](https://github.com/quiltdata/quilt/pull/2782))
+* [Changed] Delay object hashing until package push to take advantage of S3's hashing; as a result, `dest` functions no longer receive a `top_hash` ([2782](https://github.com/quiltdata/quilt/pull/2782))
+
 # 5.3.1 - 2023-05-02
+
 ## Python API
 * [Fixed] `Package.verify()` now raises exception if unsupported hash type is encountered ([#3401](https://github.com/quiltdata/quilt/pull/3401))
 
