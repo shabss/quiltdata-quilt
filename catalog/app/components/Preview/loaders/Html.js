@@ -1,23 +1,43 @@
 import * as React from 'react'
+import * as urql from 'urql'
+
 import * as Config from 'utils/Config'
 import { useIsInStack } from 'utils/BucketConfig'
 import { useStatusReportsBucket } from 'utils/StatusReportsBucket'
 
-import * as IFrameLoader from './IFrame'
+import * as File from './File'
+import * as IFrame from './IFrame'
 import * as Text from './Text'
 import * as utils from './utils'
+import BUCKET_BROWSING_QUERY from './BucketBrowsing.generated'
 
 export const detect = utils.extIn(['.htm', '.html'])
 
+function useDetectBucketBrowsing(bucket) {
+  const [{ data }] = urql.useQuery({
+    query: BUCKET_BROWSING_QUERY,
+    variables: { bucket },
+  })
+  return data?.bucketConfig?.name === 'fiskus-sandbox-dev'
+}
+
 export const Loader = function HtmlLoader({ handle, children }) {
+  const bucketBrowsing = useDetectBucketBrowsing(handle.bucket)
   const isInStack = useIsInStack()
   const { mode } = Config.use()
   const statusReportsBucket = useStatusReportsBucket()
-  return mode === 'LOCAL' ||
+
+  if (bucketBrowsing) {
+    return <File.Loader {...{ handle, children }} />
+  }
+
+  if (
+    mode === 'LOCAL' ||
     isInStack(handle.bucket) ||
-    handle.bucket === statusReportsBucket ? (
-    <IFrameLoader {...{ handle, children }} />
-  ) : (
-    <Text.Loader {...{ handle, children }} />
-  )
+    handle.bucket === statusReportsBucket
+  ) {
+    return <IFrame.Loader {...{ handle, children }} />
+  }
+
+  return <Text.Loader {...{ handle, children }} />
 }
