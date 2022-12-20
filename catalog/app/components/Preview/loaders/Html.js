@@ -14,6 +14,8 @@ import BUCKET_BROWSING_QUERY from './BucketBrowsing.generated'
 export const detect = utils.extIn(['.htm', '.html'])
 
 function useDetectBucketBrowsing(bucket) {
+  // FIXME: check if bucket config
+  //        has `standaloneBrowsing: true` option
   const [{ data }] = urql.useQuery({
     query: BUCKET_BROWSING_QUERY,
     variables: { bucket },

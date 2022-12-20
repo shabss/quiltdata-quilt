@@ -8,6 +8,7 @@ import useQuery from 'utils/useQuery'
 
 import { PreviewData } from '../types'
 
+//  FIXME: implement BucketBrowsing.gql
 import BUCKET_BROWSING_QUERY from './BucketBrowsing.generated'
 
 interface Session {
@@ -31,6 +32,9 @@ function useSessionKeepAlive(session: $TSFixMe) {
   })
   React.useEffect(() => {
     if (result.fetching) return
+    // FIXME: calculate `ttl` is from
+    //        `result?.data?.expiresAt`
+    //        or `session.expiresAt`
     const ttl = (session.expiresAt.getTime() - Date.now()) / 2
     const timer = setTimeout(() => executeQuery({ requestPolicy: 'network-only' }), ttl)
     return () => clearTimeout(timer)
@@ -67,6 +71,7 @@ interface FileLoaderProps {
 export const Loader = function FileLoader({ handle, children }: FileLoaderProps) {
   const result = useSessionCreate()
 
+  // FIXME: get `Session` from `useSessionCreate` result
   const session = React.useMemo(
     () => ({
       proxyUrl: 'https://quiltdata.com',
