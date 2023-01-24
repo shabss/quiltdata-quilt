@@ -14,6 +14,9 @@ Entries inside each section should be ordered by type:
 
 ## Catalog, Lambdas
 !-->
+## Python API
+* [Added] Validation of package entries metadata ([#3286](https://github.com/quiltdata/quilt/pull/3286))
+
 ## Catalog, Lambdas
 * [Added] Add 'ECharts' and 'Text' file type switcher, significantly refactor this switcher ([#3240](https://github.com/quiltdata/quilt/pull/3240))
 * [Added] Add link to file from Athena results ([#3242](https://github.com/quiltdata/quilt/pull/3242))
