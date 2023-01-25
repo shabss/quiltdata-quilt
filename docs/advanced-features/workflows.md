@@ -557,7 +557,7 @@ schemas:
     url: s3://bucket/must-contain-readme.json
   must-contain-readme-summarize-at-least-1byte:
     url: s3://bucket/must-contain-readme-summarize-at-least-1byte.json
-  must-contain-readme-summarize-at-least-1byte:
+  objects-must-have-id
     url: s3://bucket/objects-must-have-id.json
 ```
 
