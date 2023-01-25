@@ -551,7 +551,7 @@ workflows:
   myworkflow-3:
     name: 'My workflow #3'
     entries_schema: objects-must-have-id
-    description: All objects must have `id` property of type string in their metadata
+    description: All objects must have `id` property of string type in their metadata
 schemas:
   must-contain-readme:
     url: s3://bucket/must-contain-readme.json
