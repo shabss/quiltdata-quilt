@@ -10,7 +10,6 @@ import JsonDisplay from 'components/JsonDisplay'
 import * as Layout from 'components/Layout'
 import Placeholder from 'components/Placeholder'
 import * as style from 'constants/style'
-import * as Config from 'utils/Config'
 import { createBoundary } from 'utils/ErrorBoundary'
 import * as Okta from 'utils/Okta'
 import * as Cache from 'utils/ResourceCache'
@@ -39,8 +38,7 @@ function useField(init) {
 }
 
 function Embedder() {
-  const cfg = Config.useConfig()
-  const authenticate = Okta.use({ clientId: cfg.oktaClientId, baseUrl: cfg.oktaBaseUrl })
+  const authenticate = Okta.use()
 
   const iframeRef = React.useRef(null)
 

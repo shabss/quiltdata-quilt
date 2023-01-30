@@ -1,17 +1,19 @@
 import * as React from 'react'
 import * as urql from 'urql'
 
-import * as Config from 'utils/Config'
 import { useIsInStack } from 'utils/BucketConfig'
 import { useStatusReportsBucket } from 'utils/StatusReportsBucket'
 
 import * as File from './File'
 import * as IFrame from './IFrame'
 import * as Text from './Text'
+import FileType from './fileType'
 import * as utils from './utils'
 import BUCKET_BROWSING_QUERY from './BucketBrowsing.generated'
 
 export const detect = utils.extIn(['.htm', '.html'])
+
+export const FILE_TYPE = FileType.Html
 
 function useDetectBucketBrowsing(bucket) {
   // FIXME: check if bucket config
@@ -26,7 +28,6 @@ function useDetectBucketBrowsing(bucket) {
 export const Loader = function HtmlLoader({ handle, children }) {
   const bucketBrowsing = useDetectBucketBrowsing(handle.bucket)
   const isInStack = useIsInStack()
-  const { mode } = Config.use()
   const statusReportsBucket = useStatusReportsBucket()
 
   if (bucketBrowsing) {
