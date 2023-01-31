@@ -587,8 +587,10 @@ def create_package(req_file):
             hash_ = entry.get('hash')
             obj_size = entry.get('size')
             meta = entry.get('meta')
+            print(logical_key, meta)
 
             if hash_ and obj_size is not None:
+                print("!")
                 pkg.set(
                     logical_key,
                     quilt3.packages.PackageEntry(
@@ -599,6 +601,7 @@ def create_package(req_file):
                     )
                 )
             else:
+                print("!!")
                 pkg.set(logical_key, str(physical_key), meta)
 
                 size_to_hash += pkg[logical_key].size
@@ -615,6 +618,7 @@ def create_package(req_file):
                         {"num_files": files_to_hash, "max_files": PKG_FROM_FOLDER_MAX_FILES},
                     )
 
+        print("pkg._validate_with_workflow(")
         pkg._validate_with_workflow(
             registry=package_registry,
             workflow=data.get('workflow', ...),

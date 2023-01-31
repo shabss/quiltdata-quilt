@@ -263,7 +263,7 @@ class WorkflowValidator(typing.NamedTuple):
 
     def get_pkg_entries_for_validation(self, pkg):
         # TODO: this should be validated without fully populating array.
-        return [
+        data = [
             {
                 'logical_key': lk,
                 'size': e.size,
@@ -271,6 +271,10 @@ class WorkflowValidator(typing.NamedTuple):
             }
             for lk, e in pkg.walk()
         ]
+        import pprint
+        print('get_pkg_entries_for_validation')
+        pprint.pprint(data)
+        return data
 
     def validate(self, *, name, pkg, message):
         self.validate_message(message)
