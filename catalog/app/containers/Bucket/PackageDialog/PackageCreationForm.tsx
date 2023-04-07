@@ -301,7 +301,7 @@ function PackageCreationForm({
 
     const toUpload = addedLocalEntries.filter(({ path, file }) => {
       const e = files.existing[path]
-      return !e || e.hash !== file.hash.value
+      return !e || !R.equals(e.hash, file.hash.value)
     })
 
     const entries = filesStateToEntries(files)
@@ -369,6 +369,12 @@ function PackageCreationForm({
       })),
       R.sortBy(R.prop('logicalKey')),
     )
+    console.log('entries', {
+      files,
+      uploadedEntries,
+      s3Entries,
+      allEntries,
+    })
 
     try {
       const { packageConstruct: r } = await constructPackage({
@@ -384,6 +390,7 @@ function PackageCreationForm({
               : workflow.slug === workflows.notSelected
               ? ''
               : workflow.slug,
+          useMultipartChecksums: cfg.useMultipartChecksums,
         },
         src: {
           entries: allEntries,

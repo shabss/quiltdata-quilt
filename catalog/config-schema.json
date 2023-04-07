@@ -85,6 +85,10 @@
     "desktop": {
       "type": "boolean"
     },
+    "useMultipartChecksums": {
+      "type": "boolean",
+      "description": "Whether to use multipart checksums when creating packages via the Catalog UI."
+    },
     "build_version": {
       "type": "string",
       "description": "Optional"

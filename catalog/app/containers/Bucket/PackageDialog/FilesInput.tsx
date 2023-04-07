@@ -1,5 +1,4 @@
 import cx from 'classnames'
-import pLimit from 'p-limit'
 import * as R from 'ramda'
 import * as React from 'react'
 import { useDropzone, FileWithPath } from 'react-dropzone'
@@ -12,6 +11,7 @@ import * as urls from 'constants/urls'
 import type * as Model from 'model'
 import StyledLink from 'utils/StyledLink'
 import assertNever from 'utils/assertNever'
+import computeFileChecksum from 'utils/checksums'
 import dissocBy from 'utils/dissocBy'
 import useDragging from 'utils/dragging'
 import { withoutPrefix } from 'utils/s3paths'
@@ -35,20 +35,18 @@ const COLORS = {
 interface FileWithHash extends File {
   hash: {
     ready: boolean
-    value?: string
+    value?: Model.PackageEntryHash
     error?: Error
-    promise: Promise<string | undefined>
+    promise: Promise<Model.PackageEntryHash | undefined>
   }
   meta?: Types.JsonRecord
 }
 
 const hasHash = (f: File): f is FileWithHash => !!f && !!(f as FileWithHash).hash
 
-const hashLimit = pLimit(2)
-
 export function computeHash(f: File) {
   if (hasHash(f)) return f
-  const hashP = hashLimit(PD.hashFile, f)
+  const hashP = computeFileChecksum(f)
   const fh = f as FileWithHash
   fh.hash = { ready: false } as any
   fh.hash.promise = hashP
@@ -61,10 +59,10 @@ export function computeHash(f: File) {
       fh.hash.ready = true
       return undefined
     })
-    .then((hash) => {
-      fh.hash.value = hash
+    .then((checksum) => {
+      fh.hash.value = checksum
       fh.hash.ready = true
-      return hash
+      return checksum
     })
   return fh
 }
@@ -306,7 +304,7 @@ const computeEntries = ({
           // eslint-disable-next-line no-nested-ternary
           state = !a.hash.ready
             ? ('hashing' as const)
-            : a.hash.value === hash
+            : R.equals(a.hash.value, hash)
             ? ('unchanged' as const)
             : ('modified' as const)
         }
@@ -1473,7 +1471,7 @@ export function FilesInput({
       (acc, [path, f]) => {
         if (S3FilePicker.isS3File(f)) return acc // dont count s3 files
         const e = existing[path]
-        if (e && (!f.hash.ready || f.hash.value === e.hash)) return acc
+        if (e && (!f.hash.ready || R.equals(f.hash.value, e.hash))) return acc
         return R.evolve({ count: R.inc, size: R.add(f.size) }, acc)
       },
       { count: 0, size: 0 },

@@ -188,6 +188,14 @@ export interface Canary {
   readonly lastRun: Maybe<Scalars['Datetime']>
 }
 
+export interface Checksum {
+  readonly __typename: 'Checksum'
+  readonly type: Scalars['String']
+  readonly value: Scalars['String']
+}
+
+export type ChecksumResult = Checksum | OperationError
+
 export interface Collaborator {
   readonly __typename: 'Collaborator'
   readonly email: Scalars['String']
@@ -420,7 +428,7 @@ export interface PackageaccessCountsArgs {
 export interface PackageConstructEntry {
   readonly logicalKey: Scalars['String']
   readonly physicalKey: Scalars['String']
-  readonly hash: Maybe<Scalars['String']>
+  readonly hash: Maybe<PackageEntryHash>
   readonly size: Maybe<Scalars['Float']>
   readonly meta: Maybe<Scalars['JsonRecord']>
 }
@@ -440,6 +448,11 @@ export interface PackageDir {
 }
 
 export type PackageEntry = PackageFile | PackageDir
+
+export interface PackageEntryHash {
+  readonly type: Scalars['String']
+  readonly value: Scalars['String']
+}
 
 export interface PackageFile {
   readonly __typename: 'PackageFile'
@@ -493,6 +506,7 @@ export interface PackagePushParams {
   readonly workflow: Maybe<Scalars['String']>
   readonly bucket: Scalars['String']
   readonly name: Scalars['String']
+  readonly useMultipartChecksums: Scalars['Boolean']
 }
 
 export interface PackagePushSuccess {
@@ -591,6 +605,7 @@ export interface Query {
   readonly potentialCollaborators: ReadonlyArray<Collaborator>
   readonly packages: Maybe<PackageList>
   readonly package: Maybe<Package>
+  readonly checksum: ChecksumResult
   readonly policies: ReadonlyArray<Policy>
   readonly policy: Maybe<Policy>
   readonly roles: ReadonlyArray<Role>
@@ -611,6 +626,13 @@ export interface QuerypackagesArgs {
 export interface QuerypackageArgs {
   bucket: Scalars['String']
   name: Scalars['String']
+}
+
+export interface QuerychecksumArgs {
+  bucket: Scalars['String']
+  key: Scalars['String']
+  version: Scalars['String']
+  multipart: Scalars['Boolean']
 }
 
 export interface QuerypolicyArgs {

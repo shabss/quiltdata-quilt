@@ -48,11 +48,18 @@ export type Collaborators = ReadonlyArray<
 // Note that the actual user-defined meta is in the `user_meta` field
 export type EntryMeta = (Types.JsonRecord & { user_meta?: Types.JsonRecord }) | null
 
+export const HASH_TYPE_SP = 'SHA256' as const
+export const HASH_TYPE_MP = 'QuiltMultipartSHA256' as const
+export interface PackageEntryHash {
+  type: typeof HASH_TYPE_SP | typeof HASH_TYPE_MP
+  value: string
+}
+
 export interface PackageEntry {
   // TODO: replace with { address: { physicalKey: string }}
   //       so, you can merge PackageEntry and S3File
   physicalKey: string
-  hash: string
+  hash: PackageEntryHash
   meta?: EntryMeta
   size: number
 }

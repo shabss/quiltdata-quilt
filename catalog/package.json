@@ -90,6 +90,7 @@
     "io-ts": "^2.2.18",
     "io-ts-reporters": "^1.2.2",
     "io-ts-types": "^0.5.16",
+    "js-base64": "^3.7.5",
     "js-yaml": "^4.1.0",
     "jsoneditor-react": "^3.1.2",
     "jsonpath": "^1.1.1",
