@@ -11,6 +11,7 @@ import json
 import os
 import tempfile
 import traceback
+import typing as T
 
 import boto3
 import botocore.client
@@ -35,8 +36,7 @@ S3_HASH_LAMBDA = os.environ['S3_HASH_LAMBDA']  # To dispatch separate, stack-cre
 S3_HASH_LAMBDA_CONCURRENCY = int(os.environ['S3_HASH_LAMBDA_CONCURRENCY'])
 S3_HASH_LAMBDA_MAX_FILE_SIZE_BYTES = int(os.environ['S3_HASH_LAMBDA_MAX_FILE_SIZE_BYTES'])
 
-S3_HASH_LAMBDA_SIGNED_URL_EXPIRES_IN_SECONDS = 15 * 60  # Max lambda duration.
-S3_HASH_LAMBDA_READ_TIMEOUT = S3_HASH_LAMBDA_SIGNED_URL_EXPIRES_IN_SECONDS
+S3_HASH_LAMBDA_READ_TIMEOUT = 15 * 60  # Max lambda duration.
 
 SERVICE_BUCKET = os.environ['SERVICE_BUCKET']
 
@@ -175,7 +175,12 @@ PACKAGE_CREATE_ENTRY_SCHEMA = {
             'type': 'integer'
         },
         'hash': {
-            'type': 'string'
+            'type': 'object',
+            'properties': {
+                'type': {'type': 'string'},
+                'value': {'type': 'string'},
+            },
+            'required': ['type', 'value'],
         },
         'meta': {
             'type': 'object',
@@ -190,7 +195,8 @@ lambda_ = boto3.client('lambda', config=botocore.client.Config(read_timeout=S3_H
 
 
 # Monkey patch quilt3 S3ClientProvider, so it builds a client using user credentials.
-user_boto_session = None
+user_boto_session: T.Optional[boto3.Session] = None
+
 quilt3.data_transfer.S3ClientProvider.get_boto_session = staticmethod(lambda: user_boto_session)
 
 
@@ -228,7 +234,7 @@ class PkgpushException(Exception):
         return cls(name, {"details": qe.message})
 
 
-def calculate_pkg_hashes(boto_session, pkg):
+def calculate_pkg_hashes(pkg):
     entries = []
     for lk, entry in pkg.walk():
         if entry.hash is not None:
@@ -242,62 +248,53 @@ def calculate_pkg_hashes(boto_session, pkg):
 
         entries.append(entry)
 
-    user_s3 = boto_session.client("s3")
-
-    @functools.lru_cache(maxsize=None)
-    def get_region_for_bucket(bucket: str) -> str:
-        try:
-            resp = user_s3.head_bucket(Bucket=bucket)
-        except botocore.exceptions.ClientError as e:
-            resp = e.response
-            if resp["Error"]["Code"] == "404":
-                raise
-        return resp["ResponseMetadata"]["HTTPHeaders"]["x-amz-bucket-region"]
-
-    @functools.lru_cache(maxsize=None)
-    def get_s3_client_for_region(region: str):
-        return boto_session.client("s3", region_name=region, config=botocore.client.Config(signature_version="s3v4"))
-
-    def get_client_for_bucket(bucket: str):
-        return get_s3_client_for_region(get_region_for_bucket(bucket))
-
     with concurrent.futures.ThreadPoolExecutor(max_workers=S3_HASH_LAMBDA_CONCURRENCY) as pool:
         fs = [
-            pool.submit(calculate_pkg_entry_hash, get_client_for_bucket, entry)
+            pool.submit(calculate_pkg_entry_hash, entry)
             for entry in entries
         ]
         for f in concurrent.futures.as_completed(fs):
             f.result()
 
 
-def calculate_pkg_entry_hash(get_client_for_bucket, pkg_entry):
-    pk = pkg_entry.physical_key
-    params = {
-        'Bucket': pk.bucket,
-        'Key': pk.path,
-    }
-    if pk.version_id is not None:
-        params['VersionId'] = pk.version_id
-    url = get_client_for_bucket(pk.bucket).generate_presigned_url(
-        ClientMethod='get_object',
-        ExpiresIn=S3_HASH_LAMBDA_SIGNED_URL_EXPIRES_IN_SECONDS,
-        Params=params,
+def calculate_pkg_entry_hash(pkg_entry):
+    pkg_entry.hash = invoke_hash_lambda(pkg_entry.physical_key)
+
+
+def invoke_hash_lambda(pk):
+    assert user_boto_session
+    credentials = user_boto_session.get_credentials()
+    resp = lambda_.invoke(
+        FunctionName=S3_HASH_LAMBDA,
+        Payload=json.dumps({
+            "credentials": {
+                "aws_access_key_id": credentials.access_key,
+                "aws_secret_access_key": credentials.secret_key,
+                "aws_session_token": credentials.token,
+            },
+            "params": {
+                "location": {
+                    "bucket": pk.bucket,
+                    "key": pk.path,
+                    "version": pk.version_id,
+                },
+            },
+        }),
     )
-    pkg_entry.hash = {
-        'type': 'SHA256',
-        'value': invoke_hash_lambda(url),
-    }
 
+    parsed = json.loads(resp["Payload"])
 
-def invoke_hash_lambda(url):
-    resp = lambda_.invoke(FunctionName=S3_HASH_LAMBDA, Payload=json.dumps(url))
-    if 'FunctionError' in resp:
-        raise PkgpushException('S3HashLambdaUnhandledError')
-    return json.load(resp['Payload'])
+    if "FunctionError" in resp:
+        raise PkgpushException("S3HashLambdaUnhandledError", parsed)
+
+    if "error" in parsed:
+        raise PkgpushException("S3HashLambdaError", parsed["error"])
+
+    return parsed["result"]
 
 
 # Isolated for test-ability.
-get_user_boto_session = boto3.session.Session
+get_user_boto_session = boto3.Session
 
 
 @contextlib.contextmanager
@@ -500,7 +497,7 @@ def package_from_folder(data):
         for entry in data['entries']:
             set_entry = p.set_dir if entry['is_dir'] else p.set
             set_entry(entry['logical_key'], str(src_registry.base.join(entry['path'])))
-        calculate_pkg_hashes(user_boto_session, p)
+        calculate_pkg_hashes(p)
         return p
 
     return _push_pkg_to_successor(
@@ -604,7 +601,7 @@ def create_package(req_file):
                     quilt3.packages.PackageEntry(
                         physical_key,
                         None if obj_size is None else int(obj_size),
-                        {'type': 'SHA256', 'value': hash_},
+                        hash_,
                         meta,
                     )
                 )
@@ -636,7 +633,7 @@ def create_package(req_file):
     except quilt3.util.QuiltException as qe:
         raise PkgpushException.from_quilt_exception(qe)
 
-    calculate_pkg_hashes(user_boto_session, pkg)
+    calculate_pkg_hashes(pkg)
     try:
         top_hash = pkg._build(
             name=handle,
