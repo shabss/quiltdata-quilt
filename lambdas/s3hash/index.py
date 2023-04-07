@@ -300,7 +300,11 @@ async def compute(loc: S3ObjectSource, legacy: bool) -> Checksum:
 
 
 # Isolated for test-ability.
-get_user_boto_session = aiobotocore.session.AioSession
+def get_user_boto_session(aws_access_key_id, aws_secret_access_key, aws_session_token):
+    s = aiobotocore.session.get_session()
+    s.set_credentials(aws_access_key_id, aws_secret_access_key, aws_session_token)
+    return s
+
 
 user_boto_session: T.Optional[aiobotocore.session.AioSession] = None
 
