@@ -400,7 +400,7 @@ PARAMS_SCHEMA = {
             "properties": {
                 "bucket": {"type": "string"},
                 "key": {"type": "string"},
-                "version": {"type": "integer"},
+                "version": {"type": "string"},
             },
             "required": ["bucket", "key", "version"],
         },
