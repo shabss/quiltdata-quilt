@@ -282,7 +282,7 @@ def invoke_hash_lambda(pk):
         }),
     )
 
-    parsed = json.loads(resp["Payload"])
+    parsed = json.load(resp["Payload"])
 
     if "FunctionError" in resp:
         raise PkgpushException("S3HashLambdaUnhandledError", parsed)
