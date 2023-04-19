@@ -246,15 +246,11 @@ async def compute_part_checksums(
     mpu: MPURef,
     location: S3ObjectSource,
     parts: T.Sequence[PartDef],
-) -> T.List[bytes]:
+) -> T.Tuple[T.List[bytes], T.Any]:
     uploads = [upload_part(mpu, location, p) for p in parts]
     # retain the checksums for all the parts to compute the final checksum
     checksums: T.List[bytes] = await asyncio.gather(*uploads)
-
-    # XXX: push cloudwatch metrics?
-    print("retry stats:", upload_part.retry.statistics)
-
-    return checksums
+    return checksums, upload_part.retry.statistics
 
 
 async def create_mpu(target: S3ObjectDestination) -> MPURef:
@@ -283,6 +279,7 @@ async def compute_checksum_stream(location: S3ObjectSource) -> Checksum:
 class ChecksumResult(pydantic.BaseModel):
     checksum: Checksum
     mpu: T.Optional[MPURef] = None
+    retry_stats: T.Any = None
 
 
 # XXX: need a consistent way to serialize / deserialize exceptions
@@ -309,10 +306,17 @@ async def compute_checksum(
     credentials: AWSCredentials,
     location: S3ObjectSource,
     target: T.Optional[S3ObjectDestination] = None,
-    keep_mpu: bool = False,
-    legacy: bool = False,
-    concurrency: pydantic.PositiveInt = DEFAULT_CONCURRENCY,
+    keep_mpu: T.Optional[bool] = None,
+    legacy: T.Optional[bool] = None,
+    concurrency: T.Optional[pydantic.PositiveInt] = None,
 ) -> ChecksumResult:
+    if keep_mpu is None:
+        keep_mpu = False
+    if legacy is None:
+        legacy = False
+    if concurrency is None:
+        concurrency = DEFAULT_CONCURRENCY
+
     async with aio_context(credentials, concurrency):
         if legacy and target is None:
             checksum = await compute_checksum_stream(location)
@@ -329,7 +333,7 @@ async def compute_checksum(
 
         mpu = await create_mpu(target)
 
-        part_checksums = await compute_part_checksums(mpu, location, part_defs)
+        part_checksums, retry_stats = await compute_part_checksums(mpu, location, part_defs)
 
         checksum = Checksum.for_parts(part_checksums, part_defs)
 
@@ -340,4 +344,4 @@ async def compute_checksum(
             except Exception:
                 logger.exception("Error aborting MPU")
 
-        return ChecksumResult(checksum=checksum, mpu=mpu)
+        return ChecksumResult(checksum=checksum, mpu=mpu, retry_stats=retry_stats)
