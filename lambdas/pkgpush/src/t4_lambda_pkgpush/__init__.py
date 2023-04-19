@@ -64,8 +64,10 @@ lambda_ = boto3.client(
 
 user_boto_session = contextvars.ContextVar[boto3.Session]("user_boto_session")
 
+
 def quilt_get_boto_session(self):
     return user_boto_session.get()
+
 
 # Monkey patch quilt3 S3ClientProvider, so it builds a client using user credentials.
 quilt3.data_transfer.S3ClientProvider.get_boto_session = quilt_get_boto_session
@@ -520,6 +522,7 @@ def request_from_file(request_type: str, version_id: str):
             "RequestTooLarge",
             {"size": size, "max_size": LAMBDA_TMP_SPACE},
         )
+
     # download file with user request using lambda's role
     with tempfile.TemporaryFile() as tmp_file:
         s3.download_fileobj(
@@ -545,6 +548,19 @@ def request_from_file(request_type: str, version_id: str):
 VersionId = pydantic.constr(strip_whitespace=True, min_length=1, max_length=1024)
 
 
+def large_request_handler(request_type: str):
+    def inner(f: T.Callable[[T.IO[bytes]], T.Any]):
+        @functools.wraps(f)
+        @pydantic.validate_arguments
+        def wrapper(version_id: VersionId):
+            with request_from_file(request_type, version_id) as req_file:
+                return f(req_file)
+
+        return wrapper
+
+    return inner
+
+
 class PackageCreateParams(PackageId, PackageBuildMeta):
     pass
 
@@ -563,88 +579,86 @@ class PackageCreateEntry(pydantic.BaseModel):
 @exception_handler
 @auth
 @setup_telemetry
-@pydantic.validate_arguments
-def create_package(version_id: VersionId) -> PackagePushResult:
-    with request_from_file("create-package", version_id) as req_file:
-        params = PackageCreateParams.parse_raw(next(req_file))
+@large_request_handler("create-package")
+def create_package(req_file: T.IO[bytes]) -> PackagePushResult:
+    params = PackageCreateParams.parse_raw(next(req_file))
+    try:
+        package_registry = get_registry(params.registry)
 
-        try:
-            package_registry = get_registry(params.registry)
+        quilt3.util.validate_package_name(params.name)
+        pkg = quilt3.Package()
+        if params.meta is not None:
+            pkg.set_meta(params.meta)
 
-            quilt3.util.validate_package_name(params.name)
-            pkg = quilt3.Package()
-            if params.meta is not None:
-                pkg.set_meta(params.meta)
+        size_to_hash = 0
+        files_to_hash = 0
+        for entry in map(PackageCreateEntry.parse_raw, req_file):
+            try:
+                physical_key = PhysicalKey.from_url(entry.physical_key)
+            except ValueError:
+                raise PkgpushException(
+                    "InvalidS3PhysicalKey",
+                    {"physical_key": entry.physical_key},
+                )
+            if physical_key.is_local():
+                raise PkgpushException(
+                    "InvalidLocalPhysicalKey",
+                    {"physical_key": str(physical_key)},
+                )
 
-            size_to_hash = 0
-            files_to_hash = 0
-            for entry in map(PackageCreateEntry.parse_raw, req_file):
-                try:
-                    physical_key = PhysicalKey.from_url(entry.physical_key)
-                except ValueError:
+            if entry.hash and entry.size is not None:
+                pkg.set(
+                    entry.logical_key,
+                    quilt3.packages.PackageEntry(
+                        physical_key,
+                        entry.size,
+                        entry.hash.dict(),
+                        entry.meta,
+                    ),
+                )
+            else:
+                pkg.set(entry.logical_key, str(physical_key))
+                pkg[entry.logical_key]._meta = entry.meta or {}
+
+                size_to_hash += pkg[entry.logical_key].size
+                if size_to_hash > PKG_FROM_FOLDER_MAX_PKG_SIZE:
                     raise PkgpushException(
-                        "InvalidS3PhysicalKey",
-                        {"physical_key": entry.physical_key},
+                        "PackageTooLargeToHash",
+                        {
+                            "size": size_to_hash,
+                            "max_size": PKG_FROM_FOLDER_MAX_PKG_SIZE,
+                        },
                     )
-                if physical_key.is_local():
+
+                files_to_hash += 1
+                if files_to_hash > PKG_FROM_FOLDER_MAX_FILES:
                     raise PkgpushException(
-                        "InvalidLocalPhysicalKey",
-                        {"physical_key": str(physical_key)},
+                        "TooManyFilesToHash",
+                        {
+                            "num_files": files_to_hash,
+                            "max_files": PKG_FROM_FOLDER_MAX_FILES,
+                        },
                     )
 
-                if entry.hash and entry.size is not None:
-                    pkg.set(
-                        entry.logical_key,
-                        quilt3.packages.PackageEntry(
-                            physical_key,
-                            entry.size,
-                            entry.hash.dict(),
-                            entry.meta,
-                        ),
-                    )
-                else:
-                    pkg.set(entry.logical_key, str(physical_key))
-                    pkg[entry.logical_key]._meta = entry.meta or {}
+        pkg._validate_with_workflow(
+            registry=package_registry,
+            workflow=params.workflow,
+            name=params.name,
+            message=params.message,
+        )
 
-                    size_to_hash += pkg[entry.logical_key].size
-                    if size_to_hash > PKG_FROM_FOLDER_MAX_PKG_SIZE:
-                        raise PkgpushException(
-                            "PackageTooLargeToHash",
-                            {
-                                "size": size_to_hash,
-                                "max_size": PKG_FROM_FOLDER_MAX_PKG_SIZE,
-                            },
-                        )
+    except quilt3.util.QuiltException as qe:
+        raise PkgpushException.from_quilt_exception(qe)
 
-                    files_to_hash += 1
-                    if files_to_hash > PKG_FROM_FOLDER_MAX_FILES:
-                        raise PkgpushException(
-                            "TooManyFilesToHash",
-                            {
-                                "num_files": files_to_hash,
-                                "max_files": PKG_FROM_FOLDER_MAX_FILES,
-                            },
-                        )
+    calculate_pkg_hashes(pkg)
+    try:
+        top_hash = pkg._build(
+            name=params.name,
+            registry=params.registry,
+            message=params.message,
+        )
+    except botocore.exceptions.ClientError as boto_error:
+        raise PkgpushException.from_boto_error(boto_error)
 
-            pkg._validate_with_workflow(
-                registry=package_registry,
-                workflow=params.workflow,
-                name=params.name,
-                message=params.message,
-            )
-
-        except quilt3.util.QuiltException as qe:
-            raise PkgpushException.from_quilt_exception(qe)
-
-        calculate_pkg_hashes(pkg)
-        try:
-            top_hash = pkg._build(
-                name=params.name,
-                registry=params.registry,
-                message=params.message,
-            )
-        except botocore.exceptions.ClientError as boto_error:
-            raise PkgpushException.from_boto_error(boto_error)
-
-        # XXX: return mtime?
-        return PackagePushResult(top_hash=top_hash)
+    # XXX: return mtime?
+    return PackagePushResult(top_hash=top_hash)
