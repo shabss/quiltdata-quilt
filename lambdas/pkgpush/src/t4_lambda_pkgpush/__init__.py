@@ -4,8 +4,11 @@ limited by lambda's network throughput. Max network thoughput in
 benchmarks was about 75 MiB/s. To overcome this limitation this function
 concurrently invokes dedicated hash lambda for multiple files.
 """
+from __future__ import annotations
 import concurrent.futures
 import contextlib
+import contextvars
+import enum
 import functools
 import json
 import os
@@ -15,192 +18,57 @@ import typing as T
 
 import boto3
 import botocore.client
-from botocore.exceptions import ClientError
-from jsonschema import Draft7Validator
+import botocore.credentials
+import botocore.exceptions
+import pydantic
 
 # Must be done before importing quilt3.
-os.environ['QUILT_DISABLE_CACHE'] = 'true'  # noqa: E402
+os.environ["QUILT_DISABLE_CACHE"] = "true"  # noqa: E402
 import quilt3
+import quilt3.data_transfer
+import quilt3.telemetry
+import quilt3.util
+import quilt3.workflows
 from quilt3.backends import get_package_registry
 from quilt3.backends.s3 import S3PackageRegistryV1
 from quilt3.util import PhysicalKey
 from t4_lambda_shared.utils import LAMBDA_TMP_SPACE, get_quilt_logger
 
-PROMOTE_PKG_MAX_MANIFEST_SIZE = int(os.environ['PROMOTE_PKG_MAX_MANIFEST_SIZE'])
-PROMOTE_PKG_MAX_PKG_SIZE = int(os.environ['PROMOTE_PKG_MAX_PKG_SIZE'])
-PROMOTE_PKG_MAX_FILES = int(os.environ['PROMOTE_PKG_MAX_FILES'])
-PKG_FROM_FOLDER_MAX_PKG_SIZE = int(os.environ['PKG_FROM_FOLDER_MAX_PKG_SIZE'])
-PKG_FROM_FOLDER_MAX_FILES = int(os.environ['PKG_FROM_FOLDER_MAX_FILES'])
-S3_HASH_LAMBDA = os.environ['S3_HASH_LAMBDA']  # To dispatch separate, stack-created lambda function.
+PROMOTE_PKG_MAX_MANIFEST_SIZE = int(os.environ["PROMOTE_PKG_MAX_MANIFEST_SIZE"])
+PROMOTE_PKG_MAX_PKG_SIZE = int(os.environ["PROMOTE_PKG_MAX_PKG_SIZE"])
+PROMOTE_PKG_MAX_FILES = int(os.environ["PROMOTE_PKG_MAX_FILES"])
+PKG_FROM_FOLDER_MAX_PKG_SIZE = int(os.environ["PKG_FROM_FOLDER_MAX_PKG_SIZE"])
+PKG_FROM_FOLDER_MAX_FILES = int(os.environ["PKG_FROM_FOLDER_MAX_FILES"])
+S3_HASH_LAMBDA = os.environ[
+    "S3_HASH_LAMBDA"
+]  # To dispatch separate, stack-created lambda function.
 # CFN template guarantees S3_HASH_LAMBDA_CONCURRENCY concurrent invocation of S3 hash lambda without throttling.
-S3_HASH_LAMBDA_CONCURRENCY = int(os.environ['S3_HASH_LAMBDA_CONCURRENCY'])
-S3_HASH_LAMBDA_MAX_FILE_SIZE_BYTES = int(os.environ['S3_HASH_LAMBDA_MAX_FILE_SIZE_BYTES'])
+S3_HASH_LAMBDA_CONCURRENCY = int(os.environ["S3_HASH_LAMBDA_CONCURRENCY"])
+S3_HASH_LAMBDA_MAX_FILE_SIZE_BYTES = int(
+    os.environ["S3_HASH_LAMBDA_MAX_FILE_SIZE_BYTES"]
+)
 
 S3_HASH_LAMBDA_READ_TIMEOUT = 15 * 60  # Max lambda duration.
 
-SERVICE_BUCKET = os.environ['SERVICE_BUCKET']
-
-CREDENTIALS_SCHEMA = {
-    '$schema': 'http://json-schema.org/draft-07/schema#',
-    'id': 'https://quiltdata.com/aws-credentials/1',
-    'type': 'object',
-    'properties': {
-        'aws_access_key_id': {'type': 'string', 'pattern': '^.+$'},
-        'aws_secret_access_key': {'type': 'string', 'pattern': '^.+$'},
-        'aws_session_token': {'type': 'string', 'pattern': '^.+$'},
-    },
-    'required': [
-        'aws_access_key_id',
-        'aws_secret_access_key',
-        'aws_session_token',
-    ],
-}
-
-PACKAGE_ID_PROPS = {
-    'registry': {
-        'type': 'string',
-        'format': 'uri',
-    },
-    'name': {
-        'type': 'string',
-    },
-}
-
-PACKAGE_REV_LOCATION_SCHEMA = {
-    '$schema': 'http://json-schema.org/draft-07/schema#',
-    'id': 'https://quiltdata.com/package-revision-location/1',
-    'type': 'object',
-    'properties': {
-        **PACKAGE_ID_PROPS,
-        'top_hash': {
-            'type': 'string',
-            'pattern': '^[0-9a-f]{64}$',
-        }
-    },
-    'required': [
-        *PACKAGE_ID_PROPS,
-        'top_hash',
-    ],
-}
-
-PACKAGE_BUILD_META_PROPS = {
-    'message': {
-        'type': 'string',
-    },
-    'meta': {
-        'type': 'object',
-    },
-    'workflow': {
-        'type': ['string', 'null']
-    },
-}
-
-PACKAGE_PROMOTE_SCHEMA = {
-    '$schema': 'http://json-schema.org/draft-07/schema#',
-    'type': 'object',
-    'properties': {
-        'parent': PACKAGE_REV_LOCATION_SCHEMA,
-        **PACKAGE_ID_PROPS,
-        **PACKAGE_BUILD_META_PROPS,
-    },
-    'required': [
-        'parent',
-        *PACKAGE_ID_PROPS,
-    ],
-}
-
-PACKAGE_LOCATION_SCHEMA = {
-    '$schema': 'http://json-schema.org/draft-07/schema#',
-    'id': 'https://quiltdata.com/package-location/1',
-    'type': 'object',
-    'properties': {
-        **PACKAGE_ID_PROPS,
-    },
-    'required': list(PACKAGE_ID_PROPS),
-    'additionalProperties': False,
-}
-
-PKG_FROM_FOLDER_SCHEMA = {
-    '$schema': 'http://json-schema.org/draft-07/schema#',
-    'type': 'object',
-    'properties': {
-        'registry': {
-            'type': 'string',
-        },
-        'entries': {
-            'type': 'array',
-            'items': {
-                'type': 'object',
-                'properties': {
-                    'logical_key': {'type': 'string'},
-                    'path': {'type': 'string'},
-                    'is_dir': {'type': 'boolean'},
-                },
-                'required': ['logical_key', 'path', 'is_dir'],
-            },
-        },
-        'dst': PACKAGE_LOCATION_SCHEMA,
-        **PACKAGE_BUILD_META_PROPS,
-    },
-    'required': [
-        'registry',
-        'entries',
-        'dst',
-    ],
-    'additionalProperties': False,
-}
-
-
-PACKAGE_CREATE_SCHEMA = {
-    'type': 'object',
-    'properties': {
-        **PACKAGE_ID_PROPS,
-        **PACKAGE_BUILD_META_PROPS,
-    },
-    'required': PACKAGE_ID_PROPS,
-    'additionalProperties': False
-}
-
-
-PACKAGE_CREATE_ENTRY_SCHEMA = {
-    'type': 'object',
-    'properties': {
-        'logical_key': {
-            'type': 'string'
-        },
-        'physical_key': {
-            'type': 'string'
-        },
-        'size': {
-            'type': 'integer'
-        },
-        'hash': {
-            'type': 'object',
-            'properties': {
-                'type': {'type': 'string'},
-                'value': {'type': 'string'},
-            },
-            'required': ['type', 'value'],
-        },
-        'meta': {
-            'type': 'object',
-        },
-    },
-    'required': ['logical_key', 'physical_key'],
-}
-
-
-s3 = boto3.client('s3')
-lambda_ = boto3.client('lambda', config=botocore.client.Config(read_timeout=S3_HASH_LAMBDA_READ_TIMEOUT))
-
-
-# Monkey patch quilt3 S3ClientProvider, so it builds a client using user credentials.
-user_boto_session: T.Optional[boto3.Session] = None
-
-quilt3.data_transfer.S3ClientProvider.get_boto_session = staticmethod(lambda: user_boto_session)
+SERVICE_BUCKET = os.environ["SERVICE_BUCKET"]
 
 
 logger = get_quilt_logger()
+
+s3 = boto3.client("s3")
+lambda_ = boto3.client(
+    "lambda",
+    config=botocore.client.Config(read_timeout=S3_HASH_LAMBDA_READ_TIMEOUT),
+)
+
+
+user_boto_session = contextvars.ContextVar[boto3.Session]("user_boto_session")
+
+def quilt_get_boto_session(self):
+    return user_boto_session.get()
+
+# Monkey patch quilt3 S3ClientProvider, so it builds a client using user credentials.
+quilt3.data_transfer.S3ClientProvider.get_boto_session = quilt_get_boto_session
 
 
 class PkgpushException(Exception):
@@ -213,16 +81,19 @@ class PkgpushException(Exception):
         return {"name": self.name, "context": self.context}
 
     @classmethod
-    def from_boto_error(cls, boto_error: ClientError):
+    def from_boto_error(cls, boto_error: botocore.exceptions.ClientError):
         boto_response = boto_error.response
-        status_code = boto_response["ResponseMetadata"]["HTTPStatusCode"]
-        error_code = boto_response["Error"]["Code"]
-        error_message = boto_response["Error"]["Message"]
-        return cls("AWSError", {
-            "status_code": status_code,
-            "error_code": error_code,
-            "error_message": error_message,
-        })
+        status_code = boto_response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        error_code = boto_response.get("Error", {}).get("Code")
+        error_message = boto_response.get("Error", {}).get("Message")
+        return cls(
+            "AWSError",
+            {
+                "status_code": status_code,
+                "error_code": error_code,
+                "error_message": error_message,
+            },
+        )
 
     @classmethod
     def from_quilt_exception(cls, qe: quilt3.util.QuiltException):
@@ -234,52 +105,122 @@ class PkgpushException(Exception):
         return cls(name, {"details": qe.message})
 
 
-def calculate_pkg_hashes(pkg):
-    entries = []
-    for lk, entry in pkg.walk():
-        if entry.hash is not None:
-            continue
-        if entry.size > S3_HASH_LAMBDA_MAX_FILE_SIZE_BYTES:
-            raise PkgpushException("FileTooLargeForHashing", {
-                "logical_key": lk,
-                "size": entry.size,
-                "max_size": S3_HASH_LAMBDA_MAX_FILE_SIZE_BYTES,
-            })
+NonEmptyStr = pydantic.constr(min_length=1, strip_whitespace=True)
 
-        entries.append(entry)
+TopHash = pydantic.constr(
+    min_length=64,
+    max_length=64,
+    regex=r"^[0-9a-f]+$",
+    strip_whitespace=True,
+    to_lower=True,
+)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=S3_HASH_LAMBDA_CONCURRENCY) as pool:
-        fs = [
-            pool.submit(calculate_pkg_entry_hash, entry)
-            for entry in entries
-        ]
-        for f in concurrent.futures.as_completed(fs):
-            f.result()
+EllipsisType = type(...)
 
 
-def calculate_pkg_entry_hash(pkg_entry):
-    pkg_entry.hash = invoke_hash_lambda(pkg_entry.physical_key)
+class AWSCredentials(pydantic.BaseModel):
+    key: NonEmptyStr
+    secret: NonEmptyStr
+    token: NonEmptyStr
+
+    @property
+    def boto_args(self):
+        return dict(
+            aws_access_key_id=self.key,
+            aws_secret_access_key=self.secret,
+            aws_session_token=self.token,
+        )
+
+    @classmethod
+    def from_boto_credentials(cls, credentials: botocore.credentials.Credentials):
+        return cls(
+            key=credentials.access_key,
+            secret=credentials.secret_key,
+            token=credentials.token,
+        )
+
+    @classmethod
+    def from_boto_session(cls, session: boto3.Session):
+        return cls.from_boto_credentials(session.get_credentials())
 
 
-def invoke_hash_lambda(pk):
-    assert user_boto_session
-    credentials = user_boto_session.get_credentials()
+class PackageId(pydantic.BaseModel):
+    registry: pydantic.AnyUrl  # XXX: do we want to restrict URL format?
+    name: NonEmptyStr
+
+
+class PackageRevLocation(PackageId):
+    top_hash: TopHash
+
+
+class PackageBuildMeta(pydantic.BaseModel):
+    message: T.Optional[str] = None
+    meta: T.Optional[T.Dict[str, T.Any]] = None
+    workflow: T.Union[str, None, EllipsisType] = ...
+
+
+class S3ObjectSource(pydantic.BaseModel):
+    bucket: str
+    key: str
+    version: str
+
+    @classmethod
+    def from_pk(cls, pk: PhysicalKey):
+        return S3ObjectSource(bucket=pk.bucket, key=pk.path, version=pk.version_id)
+
+
+class S3ObjectDestination(pydantic.BaseModel):
+    bucket: str
+    key: str
+
+
+class S3HashLambdaParams(pydantic.BaseModel):
+    credentials: AWSCredentials
+    location: S3ObjectSource
+    target: T.Optional[S3ObjectDestination] = None
+    keep_mpu: T.Optional[bool] = None
+    legacy: T.Optional[bool] = None
+    concurrency: T.Optional[pydantic.PositiveInt] = None
+
+
+class ChecksumType(enum.Enum):
+    MP = "QuiltMultipartSHA256"
+    SP = "SHA256"
+
+
+class Checksum(pydantic.BaseModel):
+    # TODO: make sure this serializes to str
+    type: ChecksumType
+    value: str
+
+
+class MPURef(pydantic.BaseModel):
+    bucket: str
+    key: str
+    id: str
+
+
+class ChecksumResult(pydantic.BaseModel):
+    checksum: Checksum
+    mpu: T.Optional[MPURef] = None
+    retry_stats: T.Any = None
+
+
+# TODO: accept `legacy` parameter
+def invoke_hash_lambda(pk: PhysicalKey) -> Checksum:
     resp = lambda_.invoke(
         FunctionName=S3_HASH_LAMBDA,
-        Payload=json.dumps({
-            "credentials": {
-                "aws_access_key_id": credentials.access_key,
-                "aws_secret_access_key": credentials.secret_key,
-                "aws_session_token": credentials.token,
-            },
-            "params": {
-                "location": {
-                    "bucket": pk.bucket,
-                    "key": pk.path,
-                    "version": pk.version_id,
-                },
-            },
-        }),
+        Payload=S3HashLambdaParams(
+            credentials=AWSCredentials.from_boto_session(user_boto_session.get()),
+            location=S3ObjectSource.from_pk(pk),
+            # XXX: get target from selector_fn or smth?
+            target=S3ObjectDestination(
+                bucket=SERVICE_BUCKET,
+                key="user-requests/checksum-upload-tmp",
+            ),
+            # keep_mpu=True,
+            legacy=True,
+        ).json(exclude_unset=True),
     )
 
     parsed = json.load(resp["Payload"])
@@ -290,36 +231,62 @@ def invoke_hash_lambda(pk):
     if "error" in parsed:
         raise PkgpushException("S3HashLambdaError", parsed["error"])
 
-    return parsed["result"]
+    result = ChecksumResult(**parsed["result"])
+    if result.retry_stats:
+        logger.info("S3HashLambda retry stats: %s", result.retry_stats)
+
+    return result.checksum
+
+
+def calculate_pkg_hashes(pkg: quilt3.Package):
+    entries = []
+    for lk, entry in pkg.walk():
+        if entry.hash is not None:
+            continue
+        if entry.size > S3_HASH_LAMBDA_MAX_FILE_SIZE_BYTES:
+            raise PkgpushException(
+                "FileTooLargeForHashing",
+                {
+                    "logical_key": lk,
+                    "size": entry.size,
+                    "max_size": S3_HASH_LAMBDA_MAX_FILE_SIZE_BYTES,
+                },
+            )
+
+        entries.append(entry)
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=S3_HASH_LAMBDA_CONCURRENCY
+    ) as pool:
+        fs = [pool.submit(calculate_pkg_entry_hash, entry) for entry in entries]
+        for f in concurrent.futures.as_completed(fs):
+            f.result()
+
+
+def calculate_pkg_entry_hash(pkg_entry: quilt3.packages.PackageEntry):
+    pkg_entry.hash = invoke_hash_lambda(pkg_entry.physical_key).dict()
 
 
 # Isolated for test-ability.
 get_user_boto_session = boto3.Session
 
 
-@contextlib.contextmanager
-def setup_user_boto_session(session):
-    global user_boto_session
-    user_boto_session = session
-    try:
-        yield user_boto_session
-    finally:
-        user_boto_session = None
+class Event(pydantic.BaseModel):
+    credentials: AWSCredentials
+    params: T.Any
 
 
 def auth(f):
-    validator = Draft7Validator(CREDENTIALS_SCHEMA)
-
     @functools.wraps(f)
-    def wrapper(event):
-        credentials = event.get("credentials")
-        # TODO: collect all errors
-        ex = next(validator.iter_errors(credentials), None)
-        if ex is not None:
-            raise PkgpushException("InvalidCredentials", {"details": ex.message})
+    @pydantic.validate_arguments
+    def wrapper(event: Event):
+        session = get_user_boto_session(**event.credentials.boto_args)
+        token = user_boto_session.set(session)
+        try:
+            return f(event.params)
+        finally:
+            user_boto_session.reset(token)
 
-        with setup_user_boto_session(get_user_boto_session(**credentials)):
-            return f(event.get("params"))
     return wrapper
 
 
@@ -331,32 +298,16 @@ def exception_handler(f):
         except PkgpushException as e:
             traceback.print_exc()
             return {"error": e.asdict()}
+        except pydantic.ValidationError as e:
+            # TODO: expose advanced pydantic error reporting capabilities
+            return {
+                "error": {
+                    "name": "InvalidInputParameters",
+                    "context": {"details": str(e)},
+                },
+            }
+
     return wrapper
-
-
-def get_schema_validator(schema):
-    iter_errors = Draft7Validator(schema).iter_errors
-
-    def validator(data):
-        ex = next(iter_errors(data), None)
-        # TODO: collect all errors
-        if ex is not None:
-            raise PkgpushException("InvalidInputParameters", {"details": ex.message})
-        return data
-
-    return validator
-
-
-def json_api(schema):
-    validator = get_schema_validator(schema)
-
-    def innerdec(f):
-        @functools.wraps(f)
-        def wrapper(params):
-            validator(params)
-            return f(params)
-        return wrapper
-    return innerdec
 
 
 def setup_telemetry(f):
@@ -368,10 +319,11 @@ def setup_telemetry(f):
             # A single instance of lambda can process several requests,
             # generate new session ID for each request.
             quilt3.telemetry.reset_session_id()
+
     return wrapper
 
 
-def get_registry(registry_url):
+def get_registry(registry_url: str):
     package_registry = None
     try:
         package_registry = get_package_registry(registry_url)
@@ -385,22 +337,42 @@ def get_registry(registry_url):
     return package_registry
 
 
-def _get_successor_params(registry, successor):
+def _get_successor_params(
+    registry: S3PackageRegistryV1,
+    successor: S3PackageRegistryV1,
+) -> T.Dict[str, T.Any]:
     workflow_config = registry.get_workflow_config()
-    successors = workflow_config.config.get('successors') or {}
+    assert workflow_config
+    successors = workflow_config.config.get("successors") or {}
     for successor_url, successor_params in successors.items():
         if get_registry(successor_url) == successor:
             return successor_params
     raise PkgpushException("InvalidSuccessor", {"successor": str(successor.base)})
 
 
-def _push_pkg_to_successor(data, *, get_src, get_dst, get_name, get_pkg, pkg_max_size, pkg_max_files):
-    dst_registry = get_registry(get_dst(data))
-    src_registry = get_registry(get_src(data))
-    copy_data = _get_successor_params(src_registry, dst_registry).get('copy_data', True)
+class PackagePushResult(pydantic.BaseModel):
+    top_hash: TopHash
+
+
+def _push_pkg_to_successor(
+    *,
+    src: str,
+    dst: str,
+    name: str,
+    meta: T.Optional[dict],
+    message: T.Optional[str],
+    workflow: T.Union[str, None, EllipsisType],
+    get_pkg: T.Callable[[S3PackageRegistryV1], quilt3.Package],
+    pkg_max_size: int,
+    pkg_max_files: int,
+) -> PackagePushResult:
+    dst_registry = get_registry(dst)
+    src_registry = get_registry(src)
+    params = _get_successor_params(src_registry, dst_registry)
+    copy_data: bool = params.get("copy_data", True)
 
     try:
-        pkg = get_pkg(src_registry, data)
+        pkg = get_pkg(src_registry)
         if copy_data:
             total_size = 0
             total_files = 0
@@ -418,9 +390,8 @@ def _push_pkg_to_successor(data, *, get_src, get_dst, get_name, get_pkg, pkg_max
                         {"num_files": total_files, "max_files": pkg_max_files},
                     )
 
-        meta = data.get('meta')
         if meta is None:
-            pkg._meta.pop('user_meta', None)
+            pkg._meta.pop("user_meta", None)
         else:
             pkg.set_meta(meta)
 
@@ -428,40 +399,48 @@ def _push_pkg_to_successor(data, *, get_src, get_dst, get_name, get_pkg, pkg_max
         # to prevent unneeded ListObjects calls during generation of
         # shortened revision hash.
         result = pkg._push(
-            name=get_name(data),
-            registry=get_dst(data),
-            message=data.get('message'),
-            workflow=data.get('workflow', ...),
-            selector_fn=None if copy_data else lambda *args: False,
+            name=name,
+            registry=dst,
+            message=message,
+            workflow=workflow,
+            selector_fn=None if copy_data else lambda *_: False,
             print_info=False,
             dedupe=False,
             # TODO: we use force=True to keep the existing behavior,
             #       but it should be re-considered.
             force=True,
         )
-        return {'top_hash': result._origin.top_hash}
+        return PackagePushResult(top_hash=result._origin.top_hash)
     except quilt3.util.QuiltException as qe:
         raise PkgpushException.from_quilt_exception(qe)
-    except ClientError as boto_error:
+    except botocore.exceptions.ClientError as boto_error:
         raise PkgpushException.from_boto_error(boto_error)
     except quilt3.data_transfer.S3NoValidClientError as e:
         raise PkgpushException("Forbidden", {"details": e.message})
 
 
+# XXX: use composition instead of inheritance
+class PackagePromoteParams(PackageId, PackageBuildMeta):
+    parent: PackageRevLocation
+
+
 @exception_handler
 @auth
-@json_api(PACKAGE_PROMOTE_SCHEMA)
 @setup_telemetry
-def promote_package(data):
-    def get_pkg(src_registry, data):
-        quilt3.util.validate_package_name(data['parent']['name'])
-        manifest_pk = src_registry.manifest_pk(data['parent']['name'], data['parent']['top_hash'])
+@pydantic.validate_arguments
+def promote_package(data: PackagePromoteParams) -> PackagePushResult:
+    def get_pkg(src_registry: S3PackageRegistryV1):
+        quilt3.util.validate_package_name(data.parent.name)
+        manifest_pk = src_registry.manifest_pk(data.parent.name, data.parent.top_hash)
         manifest_size, version = quilt3.data_transfer.get_size_and_version(manifest_pk)
         if manifest_size > PROMOTE_PKG_MAX_MANIFEST_SIZE:
-            raise PkgpushException("ManifestTooLarge", {
-                "size": manifest_size,
-                "max_size": PROMOTE_PKG_MAX_MANIFEST_SIZE,
-            })
+            raise PkgpushException(
+                "ManifestTooLarge",
+                {
+                    "size": manifest_size,
+                    "max_size": PROMOTE_PKG_MAX_MANIFEST_SIZE,
+                },
+            )
         manifest_pk = PhysicalKey(manifest_pk.bucket, manifest_pk.path, version)
         # TODO: it's better to use TemporaryFile() here, but we don't have API
         #       for downloading to fileobj.
@@ -477,171 +456,195 @@ def promote_package(data):
         return pkg
 
     return _push_pkg_to_successor(
-        data,
-        get_src=lambda data: data['parent']['registry'],
-        get_dst=lambda data: data['registry'],
-        get_name=lambda data: data['name'],
+        src=data.parent.registry,
+        dst=data.registry,
+        name=data.name,
+        meta=data.meta,
+        message=data.message,
+        workflow=data.workflow,
         get_pkg=get_pkg,
         pkg_max_size=PROMOTE_PKG_MAX_PKG_SIZE,
         pkg_max_files=PROMOTE_PKG_MAX_FILES,
     )
 
 
+class PackageFromFolderEntry(pydantic.BaseModel):
+    logical_key: NonEmptyStr
+    path: NonEmptyStr
+    is_dir: bool
+
+
+class PackageFromFolderParams(PackageBuildMeta):
+    registry: NonEmptyStr
+    entries: T.List[PackageFromFolderEntry]
+    dst: PackageId
+
+
 @exception_handler
 @auth
-@json_api(PKG_FROM_FOLDER_SCHEMA)
 @setup_telemetry
-def package_from_folder(data):
-    def get_pkg(src_registry, data):
+@pydantic.validate_arguments
+def package_from_folder(data: PackageFromFolderParams) -> PackagePushResult:
+    def get_pkg(src_registry: S3PackageRegistryV1):
         p = quilt3.Package()
-        for entry in data['entries']:
-            set_entry = p.set_dir if entry['is_dir'] else p.set
-            set_entry(entry['logical_key'], str(src_registry.base.join(entry['path'])))
+        for entry in data.entries:
+            set_entry = p.set_dir if entry.is_dir else p.set
+            set_entry(entry.logical_key, str(src_registry.base.join(entry.path)))
         calculate_pkg_hashes(p)
         return p
 
     return _push_pkg_to_successor(
-        data,
-        get_src=lambda data: data['registry'],
-        get_dst=lambda data: data['dst']['registry'],
-        get_name=lambda data: data['dst']['name'],
+        src=data.registry,
+        dst=data.dst.registry,
+        name=data.dst.name,
+        meta=data.meta,
+        message=data.message,
+        workflow=data.workflow,
         get_pkg=get_pkg,
         pkg_max_size=PKG_FROM_FOLDER_MAX_PKG_SIZE,
         pkg_max_files=PKG_FROM_FOLDER_MAX_FILES,
     )
 
 
-def large_request_handler(request_type):
-    user_request_key = f'user-requests/{request_type}'
+@contextlib.contextmanager
+def request_from_file(request_type: str, version_id: str):
+    user_request_key = f"user-requests/{request_type}"
 
-    def inner(f):
-        @functools.wraps(f)
-        def wrapper(version_id):
-            size = s3.head_object(Bucket=SERVICE_BUCKET, Key=user_request_key, VersionId=version_id)['ContentLength']
-            if size > LAMBDA_TMP_SPACE:
-                raise PkgpushException(
-                    "RequestTooLarge",
-                    {"size": size, "max_size": LAMBDA_TMP_SPACE},
-                )
-            # download file with user request using lambda's role
-            with tempfile.TemporaryFile() as tmp_file:
-                s3.download_fileobj(
-                    SERVICE_BUCKET,
-                    user_request_key,
-                    tmp_file,
-                    ExtraArgs={'VersionId': version_id},
-                )
-                tmp_file.seek(0)
-                result = f(tmp_file)
-                try:
-                    # TODO: rework this as context manager, to make sure object
-                    # is deleted even when code above raises exception.
-                    s3.delete_object(
-                        Bucket=SERVICE_BUCKET,
-                        Key=user_request_key,
-                        VersionId=version_id,
-                    )
-                except Exception:
-                    logger.exception('error while removing user request file from S3')
-                return result
-        return wrapper
-    return inner
+    size = s3.head_object(
+        Bucket=SERVICE_BUCKET,
+        Key=user_request_key,
+        VersionId=version_id,
+    )["ContentLength"]
+    if size > LAMBDA_TMP_SPACE:
+        raise PkgpushException(
+            "RequestTooLarge",
+            {"size": size, "max_size": LAMBDA_TMP_SPACE},
+        )
+    # download file with user request using lambda's role
+    with tempfile.TemporaryFile() as tmp_file:
+        s3.download_fileobj(
+            SERVICE_BUCKET,
+            user_request_key,
+            tmp_file,
+            ExtraArgs={"VersionId": version_id},
+        )
+        tmp_file.seek(0)
+        yield tmp_file
+        try:
+            # TODO: rework this as context manager, to make sure object
+            # is deleted even when code above raises exception.
+            s3.delete_object(
+                Bucket=SERVICE_BUCKET,
+                Key=user_request_key,
+                VersionId=version_id,
+            )
+        except Exception:
+            logger.exception("error while removing user request file from S3")
+
+
+VersionId = pydantic.constr(strip_whitespace=True, min_length=1, max_length=1024)
+
+
+class PackageCreateParams(PackageId, PackageBuildMeta):
+    pass
+
+
+class PackageCreateEntry(pydantic.BaseModel):
+    logical_key: NonEmptyStr
+    physical_key: NonEmptyStr
+    size: T.Optional[int] = None
+    hash: T.Optional[Checksum] = None
+    # `meta` is the full metadata dict for entry that includes
+    # optional `user_meta` property,
+    # see PackageEntry._meta vs PackageEntry.meta.
+    meta: T.Optional[T.Dict[str, T.Any]] = None
 
 
 @exception_handler
 @auth
-@json_api({'type': 'string', 'minLength': 1, 'maxLength': 1024})
-@large_request_handler('create-package')
 @setup_telemetry
-def create_package(req_file):
-    json_iterator = map(json.JSONDecoder().decode, (line.decode() for line in req_file))
+@pydantic.validate_arguments
+def create_package(version_id: VersionId) -> PackagePushResult:
+    with request_from_file("create-package", version_id) as req_file:
+        params = PackageCreateParams.parse_raw(next(req_file))
 
-    data = next(json_iterator)
-    get_schema_validator(PACKAGE_CREATE_SCHEMA)(data)
-    handle = data['name']
-    registry = data['registry']
+        try:
+            package_registry = get_registry(params.registry)
 
-    try:
-        package_registry = get_registry(registry)
+            quilt3.util.validate_package_name(params.name)
+            pkg = quilt3.Package()
+            if params.meta is not None:
+                pkg.set_meta(params.meta)
 
-        meta = data.get('meta')
-        message = data.get('message')
-        quilt3.util.validate_package_name(handle)
-        pkg = quilt3.Package()
-        if meta is not None:
-            pkg.set_meta(meta)
-
-        size_to_hash = 0
-        files_to_hash = 0
-        for entry in map(get_schema_validator(PACKAGE_CREATE_ENTRY_SCHEMA), json_iterator):
-            try:
-                physical_key = PhysicalKey.from_url(entry['physical_key'])
-            except ValueError:
-                raise PkgpushException(
-                    "InvalidS3PhysicalKey",
-                    {"physical_key": entry['physical_key']},
-                )
-            if physical_key.is_local():
-                raise PkgpushException(
-                    "InvalidLocalPhysicalKey",
-                    {"physical_key": str(physical_key)},
-                )
-            logical_key = entry['logical_key']
-
-            hash_ = entry.get('hash')
-            obj_size = entry.get('size')
-            # `meta` is the full metadata dict for entry that includes
-            # optional `user_meta` property,
-            # see PackageEntry._meta vs PackageEntry.meta.
-            meta = entry.get('meta')
-
-            if hash_ and obj_size is not None:
-                pkg.set(
-                    logical_key,
-                    quilt3.packages.PackageEntry(
-                        physical_key,
-                        None if obj_size is None else int(obj_size),
-                        hash_,
-                        meta,
-                    )
-                )
-            else:
-                pkg.set(logical_key, str(physical_key))
-                pkg[logical_key]._meta = meta or {}
-
-                size_to_hash += pkg[logical_key].size
-                if size_to_hash > PKG_FROM_FOLDER_MAX_PKG_SIZE:
+            size_to_hash = 0
+            files_to_hash = 0
+            for entry in map(PackageCreateEntry.parse_raw, req_file):
+                try:
+                    physical_key = PhysicalKey.from_url(entry.physical_key)
+                except ValueError:
                     raise PkgpushException(
-                        "PackageTooLargeToHash",
-                        {"size": size_to_hash, "max_size": PKG_FROM_FOLDER_MAX_PKG_SIZE},
+                        "InvalidS3PhysicalKey",
+                        {"physical_key": entry.physical_key},
                     )
-
-                files_to_hash += 1
-                if files_to_hash > PKG_FROM_FOLDER_MAX_FILES:
+                if physical_key.is_local():
                     raise PkgpushException(
-                        "TooManyFilesToHash",
-                        {"num_files": files_to_hash, "max_files": PKG_FROM_FOLDER_MAX_FILES},
+                        "InvalidLocalPhysicalKey",
+                        {"physical_key": str(physical_key)},
                     )
 
-        pkg._validate_with_workflow(
-            registry=package_registry,
-            workflow=data.get('workflow', ...),
-            name=handle,
-            message=message,
-        )
+                if entry.hash and entry.size is not None:
+                    pkg.set(
+                        entry.logical_key,
+                        quilt3.packages.PackageEntry(
+                            physical_key,
+                            entry.size,
+                            entry.hash.dict(),
+                            entry.meta,
+                        ),
+                    )
+                else:
+                    pkg.set(entry.logical_key, str(physical_key))
+                    pkg[entry.logical_key]._meta = entry.meta or {}
 
-    except quilt3.util.QuiltException as qe:
-        raise PkgpushException.from_quilt_exception(qe)
+                    size_to_hash += pkg[entry.logical_key].size
+                    if size_to_hash > PKG_FROM_FOLDER_MAX_PKG_SIZE:
+                        raise PkgpushException(
+                            "PackageTooLargeToHash",
+                            {
+                                "size": size_to_hash,
+                                "max_size": PKG_FROM_FOLDER_MAX_PKG_SIZE,
+                            },
+                        )
 
-    calculate_pkg_hashes(pkg)
-    try:
-        top_hash = pkg._build(
-            name=handle,
-            registry=registry,
-            message=message,
-        )
-    except ClientError as boto_error:
-        raise PkgpushException.from_boto_error(boto_error)
+                    files_to_hash += 1
+                    if files_to_hash > PKG_FROM_FOLDER_MAX_FILES:
+                        raise PkgpushException(
+                            "TooManyFilesToHash",
+                            {
+                                "num_files": files_to_hash,
+                                "max_files": PKG_FROM_FOLDER_MAX_FILES,
+                            },
+                        )
 
-    # XXX: return mtime?
-    return {'top_hash': top_hash}
+            pkg._validate_with_workflow(
+                registry=package_registry,
+                workflow=params.workflow,
+                name=params.name,
+                message=params.message,
+            )
+
+        except quilt3.util.QuiltException as qe:
+            raise PkgpushException.from_quilt_exception(qe)
+
+        calculate_pkg_hashes(pkg)
+        try:
+            top_hash = pkg._build(
+                name=params.name,
+                registry=params.registry,
+                message=params.message,
+            )
+        except botocore.exceptions.ClientError as boto_error:
+            raise PkgpushException.from_boto_error(boto_error)
+
+        # XXX: return mtime?
+        return PackagePushResult(top_hash=top_hash)
