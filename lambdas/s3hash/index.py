@@ -307,25 +307,29 @@ async def compute_checksum(
     location: S3ObjectSource,
     target: T.Optional[S3ObjectDestination] = None,
     keep_mpu: T.Optional[bool] = None,
-    legacy: T.Optional[bool] = None,
+    use_multipart_checksums: T.Optional[bool] = None,
     concurrency: T.Optional[pydantic.PositiveInt] = None,
 ) -> ChecksumResult:
     if keep_mpu is None:
         keep_mpu = False
-    if legacy is None:
-        legacy = False
+    if use_multipart_checksums is None:
+        use_multipart_checksums = False
     if concurrency is None:
         concurrency = DEFAULT_CONCURRENCY
 
     async with aio_context(credentials, concurrency):
-        if legacy and target is None:
+        if not use_multipart_checksums and target is None:
             checksum = await compute_checksum_stream(location)
             return ChecksumResult(checksum=checksum)
 
         # XXX: raise validation error?
-        assert target is not None, "target must be specified for new-style checksums"
+        assert target is not None, "target must be specified for multipart checksums"
 
-        part_defs = PARTS_SINGLE if legacy else await get_parts_for_location(location)
+        part_defs = (
+            await get_parts_for_location(location)
+            if use_multipart_checksums
+            else PARTS_SINGLE
+        )
 
         checksum = await get_existing_checksum(location, part_defs)
         if checksum is not None:
@@ -333,7 +337,9 @@ async def compute_checksum(
 
         mpu = await create_mpu(target)
 
-        part_checksums, retry_stats = await compute_part_checksums(mpu, location, part_defs)
+        part_checksums, retry_stats = await compute_part_checksums(
+            mpu, location, part_defs
+        )
 
         checksum = Checksum.for_parts(part_checksums, part_defs)
 

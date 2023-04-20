@@ -79,7 +79,7 @@ class PkgpushException(Exception):
         self.name = name
         self.context = context
 
-    def asdict(self):
+    def dict(self):
         return {"name": self.name, "context": self.context}
 
     @classmethod
@@ -181,7 +181,7 @@ class S3HashLambdaParams(pydantic.BaseModel):
     location: S3ObjectSource
     target: T.Optional[S3ObjectDestination] = None
     keep_mpu: T.Optional[bool] = None
-    legacy: T.Optional[bool] = None
+    use_multipart_checksums: T.Optional[bool] = None
     concurrency: T.Optional[pydantic.PositiveInt] = None
 
 
@@ -208,8 +208,7 @@ class ChecksumResult(pydantic.BaseModel):
     retry_stats: T.Any = None
 
 
-# TODO: accept `legacy` parameter
-def invoke_hash_lambda(pk: PhysicalKey) -> Checksum:
+def invoke_hash_lambda(pk: PhysicalKey, use_multipart_checksums: bool) -> Checksum:
     resp = lambda_.invoke(
         FunctionName=S3_HASH_LAMBDA,
         Payload=S3HashLambdaParams(
@@ -221,7 +220,7 @@ def invoke_hash_lambda(pk: PhysicalKey) -> Checksum:
                 key="user-requests/checksum-upload-tmp",
             ),
             # keep_mpu=True,
-            legacy=True,
+            use_multipart_checksums=use_multipart_checksums,
         ).json(exclude_unset=True),
     )
 
@@ -240,11 +239,12 @@ def invoke_hash_lambda(pk: PhysicalKey) -> Checksum:
     return result.checksum
 
 
-def calculate_pkg_hashes(pkg: quilt3.Package):
+def calculate_pkg_hashes(pkg: quilt3.Package, use_multipart_checksums: bool):
     entries = []
     for lk, entry in pkg.walk():
         if entry.hash is not None:
             continue
+        assert isinstance(entry.size, int)
         if entry.size > S3_HASH_LAMBDA_MAX_FILE_SIZE_BYTES:
             raise PkgpushException(
                 "FileTooLargeForHashing",
@@ -260,13 +260,20 @@ def calculate_pkg_hashes(pkg: quilt3.Package):
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=S3_HASH_LAMBDA_CONCURRENCY
     ) as pool:
-        fs = [pool.submit(calculate_pkg_entry_hash, entry) for entry in entries]
+        fs = [
+            pool.submit(calculate_pkg_entry_hash, entry, use_multipart_checksums)
+            for entry in entries
+        ]
         for f in concurrent.futures.as_completed(fs):
             f.result()
 
 
-def calculate_pkg_entry_hash(pkg_entry: quilt3.packages.PackageEntry):
-    pkg_entry.hash = invoke_hash_lambda(pkg_entry.physical_key).dict()
+def calculate_pkg_entry_hash(
+    pkg_entry: quilt3.packages.PackageEntry, use_multipart_checksums: bool
+):
+    pkg_entry.hash = invoke_hash_lambda(
+        pkg_entry.physical_key, use_multipart_checksums
+    ).dict()
 
 
 # Isolated for test-ability.
@@ -299,7 +306,7 @@ def exception_handler(f):
             return {"result": f(event)}
         except PkgpushException as e:
             traceback.print_exc()
-            return {"error": e.asdict()}
+            return {"error": e.dict()}
         except pydantic.ValidationError as e:
             # TODO: expose advanced pydantic error reporting capabilities
             return {
@@ -352,26 +359,34 @@ def _get_successor_params(
     raise PkgpushException("InvalidSuccessor", {"successor": str(successor.base)})
 
 
+class PackagePushParams(pydantic.BaseModel):
+    bucket: NonEmptyStr
+    # XXX: validate package name?
+    # e.g. quilt3.util.validate_package_name(name)
+    name: NonEmptyStr
+    message: T.Optional[NonEmptyStr] = None
+    user_meta: T.Optional[T.Dict[str, T.Any]] = None
+    workflow: T.Union[str, None, EllipsisType] = ...
+    use_multipart_checksums: bool = False
+
+
 class PackagePushResult(pydantic.BaseModel):
     top_hash: TopHash
 
 
 def _push_pkg_to_successor(
+    params: PackagePushParams,
     *,
-    src: str,
-    dst: str,
-    name: str,
-    meta: T.Optional[dict],
-    message: T.Optional[str],
-    workflow: T.Union[str, None, EllipsisType],
+    src_bucket: str,
     get_pkg: T.Callable[[S3PackageRegistryV1], quilt3.Package],
     pkg_max_size: int,
     pkg_max_files: int,
 ) -> PackagePushResult:
-    dst_registry = get_registry(dst)
-    src_registry = get_registry(src)
-    params = _get_successor_params(src_registry, dst_registry)
-    copy_data: bool = params.get("copy_data", True)
+    dst_registry_url = f"s3://{params.bucket}"
+    dst_registry = get_registry(dst_registry_url)
+    src_registry = get_registry(f"s3://{src_bucket}")
+    successor_params = _get_successor_params(src_registry, dst_registry)
+    copy_data: bool = successor_params.get("copy_data", True)
 
     try:
         pkg = get_pkg(src_registry)
@@ -379,6 +394,7 @@ def _push_pkg_to_successor(
             total_size = 0
             total_files = 0
             for lk, e in pkg.walk():
+                assert isinstance(e.size, int)
                 total_size += e.size
                 if total_size > pkg_max_size:
                     raise PkgpushException(
@@ -392,19 +408,19 @@ def _push_pkg_to_successor(
                         {"num_files": total_files, "max_files": pkg_max_files},
                     )
 
-        if meta is None:
+        if params.user_meta is None:
             pkg._meta.pop("user_meta", None)
         else:
-            pkg.set_meta(meta)
+            pkg.set_meta(params.user_meta)
 
         # We use _push() instead of push() for print_info=False
         # to prevent unneeded ListObjects calls during generation of
         # shortened revision hash.
         result = pkg._push(
-            name=name,
-            registry=dst,
-            message=message,
-            workflow=workflow,
+            name=params.name,
+            registry=dst_registry_url,
+            message=params.message,
+            workflow=params.workflow,
             selector_fn=None if copy_data else lambda *_: False,
             print_info=False,
             dedupe=False,
@@ -412,6 +428,7 @@ def _push_pkg_to_successor(
             #       but it should be re-considered.
             force=True,
         )
+        assert result._origin is not None
         return PackagePushResult(top_hash=result._origin.top_hash)
     except quilt3.util.QuiltException as qe:
         raise PkgpushException.from_quilt_exception(qe)
@@ -421,19 +438,25 @@ def _push_pkg_to_successor(
         raise PkgpushException("Forbidden", {"details": e.message})
 
 
-# XXX: use composition instead of inheritance
-class PackagePromoteParams(PackageId, PackageBuildMeta):
-    parent: PackageRevLocation
+class PackagePromoteSource(pydantic.BaseModel):
+    bucket: NonEmptyStr
+    name: NonEmptyStr
+    top_hash: TopHash
+
+
+class PackagePromoteParams(PackagePushParams):
+    src: PackagePromoteSource
 
 
 @exception_handler
 @auth
 @setup_telemetry
 @pydantic.validate_arguments
-def promote_package(data: PackagePromoteParams) -> PackagePushResult:
+def promote_package(params: PackagePromoteParams) -> PackagePushResult:
     def get_pkg(src_registry: S3PackageRegistryV1):
-        quilt3.util.validate_package_name(data.parent.name)
-        manifest_pk = src_registry.manifest_pk(data.parent.name, data.parent.top_hash)
+        quilt3.util.validate_package_name(params.src.name)
+
+        manifest_pk = src_registry.manifest_pk(params.src.name, params.src.top_hash)
         manifest_size, version = quilt3.data_transfer.get_size_and_version(manifest_pk)
         if manifest_size > PROMOTE_PKG_MAX_MANIFEST_SIZE:
             raise PkgpushException(
@@ -443,7 +466,9 @@ def promote_package(data: PackagePromoteParams) -> PackagePushResult:
                     "max_size": PROMOTE_PKG_MAX_MANIFEST_SIZE,
                 },
             )
+
         manifest_pk = PhysicalKey(manifest_pk.bucket, manifest_pk.path, version)
+
         # TODO: it's better to use TemporaryFile() here, but we don't have API
         #       for downloading to fileobj.
         with tempfile.NamedTemporaryFile() as tmp_file:
@@ -453,17 +478,15 @@ def promote_package(data: PackagePromoteParams) -> PackagePushResult:
                 size=manifest_size,
             )
             pkg = quilt3.Package.load(tmp_file)
+
         if any(e.physical_key.is_local() for lk, e in pkg.walk()):
             raise PkgpushException("ManifestHasLocalKeys")
+
         return pkg
 
     return _push_pkg_to_successor(
-        src=data.parent.registry,
-        dst=data.registry,
-        name=data.name,
-        meta=data.meta,
-        message=data.message,
-        workflow=data.workflow,
+        params,
+        src_bucket=params.src.bucket,
         get_pkg=get_pkg,
         pkg_max_size=PROMOTE_PKG_MAX_PKG_SIZE,
         pkg_max_files=PROMOTE_PKG_MAX_FILES,
@@ -476,32 +499,27 @@ class PackageFromFolderEntry(pydantic.BaseModel):
     is_dir: bool
 
 
-class PackageFromFolderParams(PackageBuildMeta):
-    registry: NonEmptyStr
+class PackageFromFolderParams(PackagePushParams):
+    src_bucket: NonEmptyStr
     entries: T.List[PackageFromFolderEntry]
-    dst: PackageId
 
 
 @exception_handler
 @auth
 @setup_telemetry
 @pydantic.validate_arguments
-def package_from_folder(data: PackageFromFolderParams) -> PackagePushResult:
+def package_from_folder(params: PackageFromFolderParams) -> PackagePushResult:
     def get_pkg(src_registry: S3PackageRegistryV1):
         p = quilt3.Package()
-        for entry in data.entries:
+        for entry in params.entries:
             set_entry = p.set_dir if entry.is_dir else p.set
             set_entry(entry.logical_key, str(src_registry.base.join(entry.path)))
-        calculate_pkg_hashes(p)
+        calculate_pkg_hashes(p, params.use_multipart_checksums)
         return p
 
     return _push_pkg_to_successor(
-        src=data.registry,
-        dst=data.dst.registry,
-        name=data.dst.name,
-        meta=data.meta,
-        message=data.message,
-        workflow=data.workflow,
+        params,
+        src_bucket=params.src_bucket,
         get_pkg=get_pkg,
         pkg_max_size=PKG_FROM_FOLDER_MAX_PKG_SIZE,
         pkg_max_files=PKG_FROM_FOLDER_MAX_FILES,
@@ -561,11 +579,7 @@ def large_request_handler(request_type: str):
     return inner
 
 
-class PackageCreateParams(PackageId, PackageBuildMeta):
-    pass
-
-
-class PackageCreateEntry(pydantic.BaseModel):
+class PackageConstructEntry(pydantic.BaseModel):
     logical_key: NonEmptyStr
     physical_key: NonEmptyStr
     size: T.Optional[int] = None
@@ -581,18 +595,19 @@ class PackageCreateEntry(pydantic.BaseModel):
 @setup_telemetry
 @large_request_handler("create-package")
 def create_package(req_file: T.IO[bytes]) -> PackagePushResult:
-    params = PackageCreateParams.parse_raw(next(req_file))
+    params = PackagePushParams.parse_raw(next(req_file))
+    registry_url = f"s3://{params.bucket}"
     try:
-        package_registry = get_registry(params.registry)
+        package_registry = get_registry(registry_url)
 
         quilt3.util.validate_package_name(params.name)
         pkg = quilt3.Package()
-        if params.meta is not None:
-            pkg.set_meta(params.meta)
+        if params.user_meta is not None:
+            pkg.set_meta(params.user_meta)
 
         size_to_hash = 0
         files_to_hash = 0
-        for entry in map(PackageCreateEntry.parse_raw, req_file):
+        for entry in map(PackageConstructEntry.parse_raw, req_file):
             try:
                 physical_key = PhysicalKey.from_url(entry.physical_key)
             except ValueError:
@@ -618,9 +633,12 @@ def create_package(req_file: T.IO[bytes]) -> PackagePushResult:
                 )
             else:
                 pkg.set(entry.logical_key, str(physical_key))
-                pkg[entry.logical_key]._meta = entry.meta or {}
+                pkg_entry = pkg[entry.logical_key]
+                assert isinstance(pkg_entry, quilt3.packages.PackageEntry)
+                pkg_entry._meta = entry.meta or {}
 
-                size_to_hash += pkg[entry.logical_key].size
+                assert isinstance(pkg_entry.size, int)
+                size_to_hash += pkg_entry.size
                 if size_to_hash > PKG_FROM_FOLDER_MAX_PKG_SIZE:
                     raise PkgpushException(
                         "PackageTooLargeToHash",
@@ -650,11 +668,11 @@ def create_package(req_file: T.IO[bytes]) -> PackagePushResult:
     except quilt3.util.QuiltException as qe:
         raise PkgpushException.from_quilt_exception(qe)
 
-    calculate_pkg_hashes(pkg)
+    calculate_pkg_hashes(pkg, params.use_multipart_checksums)
     try:
         top_hash = pkg._build(
             name=params.name,
-            registry=params.registry,
+            registry=registry_url,
             message=params.message,
         )
     except botocore.exceptions.ClientError as boto_error:
