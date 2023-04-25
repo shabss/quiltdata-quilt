@@ -349,6 +349,10 @@ class PackagePushParams(pydantic.BaseModel):
     workflow: T.Union[str, None, EllipsisType] = ...
     use_multipart_checksums: bool = False
 
+    class Config:
+        arbitrary_types_allowed = True
+
+
 
 class PackagePushResult(pydantic.BaseModel):
     top_hash: TopHash
