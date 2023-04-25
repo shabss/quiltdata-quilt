@@ -238,10 +238,10 @@ def calculate_pkg_hashes(pkg: quilt3.Package, use_multipart_checksums: bool):
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=S3_HASH_LAMBDA_CONCURRENCY
     ) as pool:
-        fs = [
-            pool.submit(calculate_pkg_entry_hash, entry, use_multipart_checksums)
-            for entry in entries
-        ]
+        ctx = contextvars.copy_context()
+        def run(entry):
+            return ctx.run(calculate_pkg_entry_hash, entry, use_multipart_checksums)
+        fs = [pool.submit(run, entry) for entry in entries]
         for f in concurrent.futures.as_completed(fs):
             f.result()
 
