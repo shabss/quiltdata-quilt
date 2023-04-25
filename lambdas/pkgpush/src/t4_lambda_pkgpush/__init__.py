@@ -168,7 +168,7 @@ class S3HashLambdaParams(pydantic.BaseModel):
     concurrency: T.Optional[pydantic.PositiveInt] = None
 
 
-class ChecksumType(enum.Enum, str):
+class ChecksumType(str, enum.Enum):
     MP = "QuiltMultipartSHA256"
     SP = "SHA256"
 

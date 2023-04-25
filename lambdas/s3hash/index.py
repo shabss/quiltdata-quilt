@@ -68,7 +68,7 @@ class S3hashException(Exception):
         return {"name": self.name, "context": self.context}
 
 
-class ChecksumType(enum.Enum, str):
+class ChecksumType(str, enum.Enum):
     MP = "QuiltMultipartSHA256"
     SP = "SHA256"
 
