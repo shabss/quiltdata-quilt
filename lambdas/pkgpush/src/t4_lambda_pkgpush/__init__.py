@@ -4,6 +4,7 @@ limited by lambda's network throughput. Max network thoughput in
 benchmarks was about 75 MiB/s. To overcome this limitation this function
 concurrently invokes dedicated hash lambda for multiple files.
 """
+# TODO: adjust the decsription above
 from __future__ import annotations
 import concurrent.futures
 import contextlib
@@ -39,9 +40,8 @@ PROMOTE_PKG_MAX_PKG_SIZE = int(os.environ["PROMOTE_PKG_MAX_PKG_SIZE"])
 PROMOTE_PKG_MAX_FILES = int(os.environ["PROMOTE_PKG_MAX_FILES"])
 PKG_FROM_FOLDER_MAX_PKG_SIZE = int(os.environ["PKG_FROM_FOLDER_MAX_PKG_SIZE"])
 PKG_FROM_FOLDER_MAX_FILES = int(os.environ["PKG_FROM_FOLDER_MAX_FILES"])
-S3_HASH_LAMBDA = os.environ[
-    "S3_HASH_LAMBDA"
-]  # To dispatch separate, stack-created lambda function.
+# To dispatch separate, stack-created lambda function.
+S3_HASH_LAMBDA = os.environ["S3_HASH_LAMBDA"]
 # CFN template guarantees S3_HASH_LAMBDA_CONCURRENCY concurrent invocation of S3 hash lambda without throttling.
 S3_HASH_LAMBDA_CONCURRENCY = int(os.environ["S3_HASH_LAMBDA_CONCURRENCY"])
 S3_HASH_LAMBDA_MAX_FILE_SIZE_BYTES = int(
@@ -51,7 +51,8 @@ S3_HASH_LAMBDA_MAX_FILE_SIZE_BYTES = int(
 S3_HASH_LAMBDA_READ_TIMEOUT = 15 * 60  # Max lambda duration.
 
 SERVICE_BUCKET = os.environ["SERVICE_BUCKET"]
-
+USER_REQUESTS_PREFIX = "user-requests/"
+SCRATCH_KEY = USER_REQUESTS_PREFIX + "checksum-upload-tmp"
 
 logger = get_quilt_logger()
 
@@ -134,31 +135,13 @@ class AWSCredentials(pydantic.BaseModel):
         )
 
     @classmethod
-    def from_boto_credentials(cls, credentials: botocore.credentials.Credentials):
+    def from_boto_session(cls, session: boto3.Session):
+        credentials = session.get_credentials()
         return cls(
             key=credentials.access_key,
             secret=credentials.secret_key,
             token=credentials.token,
         )
-
-    @classmethod
-    def from_boto_session(cls, session: boto3.Session):
-        return cls.from_boto_credentials(session.get_credentials())
-
-
-class PackageId(pydantic.BaseModel):
-    registry: pydantic.AnyUrl  # XXX: do we want to restrict URL format?
-    name: NonEmptyStr
-
-
-class PackageRevLocation(PackageId):
-    top_hash: TopHash
-
-
-class PackageBuildMeta(pydantic.BaseModel):
-    message: T.Optional[str] = None
-    meta: T.Optional[T.Dict[str, T.Any]] = None
-    workflow: T.Union[str, None, EllipsisType] = ...
 
 
 class S3ObjectSource(pydantic.BaseModel):
@@ -185,13 +168,12 @@ class S3HashLambdaParams(pydantic.BaseModel):
     concurrency: T.Optional[pydantic.PositiveInt] = None
 
 
-class ChecksumType(enum.Enum):
+class ChecksumType(enum.Enum, str):
     MP = "QuiltMultipartSHA256"
     SP = "SHA256"
 
 
 class Checksum(pydantic.BaseModel):
-    # TODO: make sure this serializes to str
     type: ChecksumType
     value: str
 
@@ -215,11 +197,7 @@ def invoke_hash_lambda(pk: PhysicalKey, use_multipart_checksums: bool) -> Checks
             credentials=AWSCredentials.from_boto_session(user_boto_session.get()),
             location=S3ObjectSource.from_pk(pk),
             # XXX: get target from selector_fn or smth?
-            target=S3ObjectDestination(
-                bucket=SERVICE_BUCKET,
-                key="user-requests/checksum-upload-tmp",
-            ),
-            # keep_mpu=True,
+            target=S3ObjectDestination(bucket=SERVICE_BUCKET, key=SCRATCH_KEY),
             use_multipart_checksums=use_multipart_checksums,
         ).json(exclude_unset=True),
     )
@@ -269,10 +247,12 @@ def calculate_pkg_hashes(pkg: quilt3.Package, use_multipart_checksums: bool):
 
 
 def calculate_pkg_entry_hash(
-    pkg_entry: quilt3.packages.PackageEntry, use_multipart_checksums: bool
+    pkg_entry: quilt3.packages.PackageEntry,
+    use_multipart_checksums: bool,
 ):
     pkg_entry.hash = invoke_hash_lambda(
-        pkg_entry.physical_key, use_multipart_checksums
+        pkg_entry.physical_key,
+        use_multipart_checksums,
     ).dict()
 
 
@@ -303,7 +283,7 @@ def exception_handler(f):
     @functools.wraps(f)
     def wrapper(event, _context):
         try:
-            return {"result": f(event)}
+            return {"result": f(event).dict()}
         except PkgpushException as e:
             traceback.print_exc()
             return {"error": e.dict()}
@@ -528,7 +508,7 @@ def package_from_folder(params: PackageFromFolderParams) -> PackagePushResult:
 
 @contextlib.contextmanager
 def request_from_file(request_type: str, version_id: str):
-    user_request_key = f"user-requests/{request_type}"
+    user_request_key = USER_REQUESTS_PREFIX + request_type
 
     size = s3.head_object(
         Bucket=SERVICE_BUCKET,
@@ -552,8 +532,6 @@ def request_from_file(request_type: str, version_id: str):
         tmp_file.seek(0)
         yield tmp_file
         try:
-            # TODO: rework this as context manager, to make sure object
-            # is deleted even when code above raises exception.
             s3.delete_object(
                 Bucket=SERVICE_BUCKET,
                 Key=user_request_key,

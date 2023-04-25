@@ -23,7 +23,7 @@ from t4_lambda_shared.utils import get_quilt_logger
 logger = get_quilt_logger()
 
 # TODO: get from env
-DEFAULT_CONCURRENCY = 1000
+DEFAULT_CONCURRENCY = 500
 
 
 S3: contextvars.ContextVar[S3Client] = contextvars.ContextVar("s3")
@@ -68,13 +68,12 @@ class S3hashException(Exception):
         return {"name": self.name, "context": self.context}
 
 
-class ChecksumType(enum.Enum):
+class ChecksumType(enum.Enum, str):
     MP = "QuiltMultipartSHA256"
     SP = "SHA256"
 
 
 class Checksum(pydantic.BaseModel):
-    # TODO: make sure this serializes to str
     type: ChecksumType
     value: str
 
@@ -147,6 +146,7 @@ MIN_PART_SIZE = 1024**2 * 8
 MAX_PARTS = 10000  # Maximum number of parts per upload supported by S3
 
 
+# XXX: import this logic from quilt3
 def get_part_size(file_size: int) -> T.Optional[int]:
     if file_size < MIN_PART_SIZE:
         return None  # use single-part upload (and plain SHA256 hash)
@@ -167,6 +167,7 @@ async def get_existing_checksum(
     location: S3ObjectSource,
     parts: T.Sequence[PartDef],
 ) -> T.Optional[Checksum]:
+    # XXX
     # get object attributes and see if part sizes and checksum algo matches our standard
     # return the existing checksum if it's compliant
     # otherwise return None
@@ -248,18 +249,15 @@ async def compute_part_checksums(
     parts: T.Sequence[PartDef],
 ) -> T.Tuple[T.List[bytes], T.Any]:
     uploads = [upload_part(mpu, location, p) for p in parts]
-    # retain the checksums for all the parts to compute the final checksum
     checksums: T.List[bytes] = await asyncio.gather(*uploads)
     return checksums, upload_part.retry.statistics
 
 
 async def create_mpu(target: S3ObjectDestination) -> MPURef:
-    # initiate a multipart upload to the given destination
     upload_data = await S3.get().create_multipart_upload(
         **target.boto_args,
         ChecksumAlgorithm="SHA256",
     )
-
     return MPURef(bucket=target.bucket, key=target.key, id=upload_data["UploadId"])
 
 
@@ -284,9 +282,6 @@ class ChecksumResult(pydantic.BaseModel):
 
 # XXX: need a consistent way to serialize / deserialize exceptions
 def lambda_handler(f):
-    # TODO: catch validation errors
-    # raise S3hashException("InvalidCredentials", {"details": ex.message})
-    # raise S3hashException("InvalidInputParameters", {"details": ex.message})
     @functools.wraps(f)
     def wrapper(event, _context):
         try:
@@ -294,6 +289,14 @@ def lambda_handler(f):
         except S3hashException as e:
             traceback.print_exc()
             return {"error": e.dict()}
+        except pydantic.ValidationError as e:
+            # TODO: expose advanced pydantic error reporting capabilities
+            return {
+                "error": {
+                    "name": "InvalidInputParameters",
+                    "context": {"details": str(e)},
+                },
+            }
 
     return wrapper
 
@@ -322,8 +325,11 @@ async def compute_checksum(
             checksum = await compute_checksum_stream(location)
             return ChecksumResult(checksum=checksum)
 
-        # XXX: raise validation error?
-        assert target is not None, "target must be specified for multipart checksums"
+        if target is None:
+            raise S3hashException(
+                "InvalidInputParameters",
+                {"details": "target must be specified for multipart checksums"},
+            )
 
         part_defs = (
             await get_parts_for_location(location)
