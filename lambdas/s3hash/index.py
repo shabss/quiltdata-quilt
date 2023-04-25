@@ -281,7 +281,7 @@ class ChecksumResult(pydantic.BaseModel):
 
 
 # XXX: need a consistent way to serialize / deserialize exceptions
-def lambda_handler(f):
+def lambda_wrapper(f):
     @functools.wraps(f)
     def wrapper(event, _context):
         try:
@@ -303,9 +303,9 @@ def lambda_handler(f):
 
 # XXX: move decorators to shared?
 # XXX: move reusable models/dataclasses to shared?
-@lambda_handler
+@lambda_wrapper
 @pydantic.validate_arguments
-async def compute_checksum(
+async def lambda_handler(
     credentials: AWSCredentials,
     location: S3ObjectSource,
     target: T.Optional[S3ObjectDestination] = None,
