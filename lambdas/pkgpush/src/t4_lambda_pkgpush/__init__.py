@@ -346,12 +346,20 @@ class PackagePushParams(pydantic.BaseModel):
     name: NonEmptyStr
     message: T.Optional[NonEmptyStr] = None
     user_meta: T.Optional[T.Dict[str, T.Any]] = None
-    workflow: T.Union[str, None, EllipsisType] = ...
+    workflow: T.Optional[str] = None
     use_multipart_checksums: bool = False
 
-    class Config:
-        arbitrary_types_allowed = True
+    @property
+    def workflow_normalized(self):
+        # use default
+        if self.workflow is None:
+            return ...
 
+        # not selected
+        if self.workflow == "":
+            return None
+
+        return self.workflow
 
 
 class PackagePushResult(pydantic.BaseModel):
@@ -404,7 +412,7 @@ def _push_pkg_to_successor(
             name=params.name,
             registry=dst_registry_url,
             message=params.message,
-            workflow=params.workflow,
+            workflow=params.workflow_normalized,
             selector_fn=None if copy_data else lambda *_: False,
             print_info=False,
             dedupe=False,
@@ -642,7 +650,7 @@ def create_package(req_file: T.IO[bytes]) -> PackagePushResult:
 
         pkg._validate_with_workflow(
             registry=package_registry,
-            workflow=params.workflow,
+            workflow=params.workflow_normalized,
             name=params.name,
             message=params.message,
         )
