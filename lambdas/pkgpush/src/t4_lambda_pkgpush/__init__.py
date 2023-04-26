@@ -6,6 +6,7 @@ concurrently invokes dedicated hash lambda for multiple files.
 """
 # TODO: adjust the decsription above
 from __future__ import annotations
+
 import concurrent.futures
 import contextlib
 import contextvars
@@ -14,7 +15,6 @@ import functools
 import json
 import os
 import tempfile
-import traceback
 import typing as T
 
 import boto3
@@ -35,6 +35,7 @@ from quilt3.backends.s3 import S3PackageRegistryV1
 from quilt3.util import PhysicalKey
 from t4_lambda_shared.utils import LAMBDA_TMP_SPACE, get_quilt_logger
 
+# XXX: use pydantic to manage settings
 PROMOTE_PKG_MAX_MANIFEST_SIZE = int(os.environ["PROMOTE_PKG_MAX_MANIFEST_SIZE"])
 PROMOTE_PKG_MAX_PKG_SIZE = int(os.environ["PROMOTE_PKG_MAX_PKG_SIZE"])
 PROMOTE_PKG_MAX_FILES = int(os.environ["PROMOTE_PKG_MAX_FILES"])
@@ -47,12 +48,14 @@ S3_HASH_LAMBDA_CONCURRENCY = int(os.environ["S3_HASH_LAMBDA_CONCURRENCY"])
 S3_HASH_LAMBDA_MAX_FILE_SIZE_BYTES = int(
     os.environ["S3_HASH_LAMBDA_MAX_FILE_SIZE_BYTES"]
 )
+MULTIPART_CHECKSUMS = os.environ["MULTIPART_CHECKSUMS"] == "true"
 
 S3_HASH_LAMBDA_READ_TIMEOUT = 15 * 60  # Max lambda duration.
 
 SERVICE_BUCKET = os.environ["SERVICE_BUCKET"]
 USER_REQUESTS_PREFIX = "user-requests/"
 SCRATCH_KEY = USER_REQUESTS_PREFIX + "checksum-upload-tmp"
+SCRATCH_KEY_PER_BUCKET = ".quilt/.checksum-upload-tmp"
 
 logger = get_quilt_logger()
 
@@ -157,12 +160,14 @@ class S3ObjectDestination(pydantic.BaseModel):
     key: str
 
 
+MPUTarget = T.Union[S3ObjectDestination, T.List[S3ObjectDestination]]
+
+
 class S3HashLambdaParams(pydantic.BaseModel):
     credentials: AWSCredentials
     location: S3ObjectSource
-    target: T.Optional[S3ObjectDestination] = None
-    keep_mpu: T.Optional[bool] = None
-    use_multipart_checksums: T.Optional[bool] = None
+    multipart: bool
+    target: T.Optional[MPUTarget] = None
     concurrency: T.Optional[pydantic.PositiveInt] = None
 
 
@@ -184,27 +189,31 @@ class MPURef(pydantic.BaseModel):
 
 class ChecksumResult(pydantic.BaseModel):
     checksum: Checksum
-    mpu: T.Optional[MPURef] = None
-    retry_stats: T.Any = None
+    stats: T.Optional[dict] = None
 
 
-def invoke_hash_lambda(
-    pk: PhysicalKey,
-    credentials: AWSCredentials,
-    use_multipart_checksums: bool,
-) -> Checksum:
+def target_for_pk(pk: PhysicalKey):
+    # XXX: get target from selector_fn or smth?
+    return [
+        S3ObjectDestination(bucket=pk.bucket, key=SCRATCH_KEY_PER_BUCKET),
+        S3ObjectDestination(bucket=SERVICE_BUCKET, key=SCRATCH_KEY),
+    ]
+
+
+def invoke_hash_lambda(pk: PhysicalKey, credentials: AWSCredentials) -> Checksum:
+    logger.info("invoke hash lambda")
     resp = lambda_.invoke(
         FunctionName=S3_HASH_LAMBDA,
         Payload=S3HashLambdaParams(
             credentials=credentials,
             location=S3ObjectSource.from_pk(pk),
-            # XXX: get target from selector_fn or smth?
-            target=S3ObjectDestination(bucket=SERVICE_BUCKET, key=SCRATCH_KEY),
-            use_multipart_checksums=use_multipart_checksums,
-        ).json(exclude_unset=True),
+            target=target_for_pk(pk),
+            multipart=MULTIPART_CHECKSUMS,
+        ).json(exclude_defaults=True),
     )
 
     parsed = json.load(resp["Payload"])
+    logger.info("response from hash lambda: %s", parsed)
 
     if "FunctionError" in resp:
         raise PkgpushException("S3HashLambdaUnhandledError", parsed)
@@ -212,26 +221,19 @@ def invoke_hash_lambda(
     if "error" in parsed:
         raise PkgpushException("S3HashLambdaError", parsed["error"])
 
-    result = ChecksumResult(**parsed["result"])
-    if result.retry_stats:
-        logger.info("S3HashLambda retry stats: %s", result.retry_stats)
-
-    return result.checksum
+    return ChecksumResult(**parsed["result"]).checksum
 
 
 def calculate_pkg_entry_hash(
     pkg_entry: quilt3.packages.PackageEntry,
     credentials: AWSCredentials,
-    use_multipart_checksums: bool,
 ):
-    pkg_entry.hash = invoke_hash_lambda(
-        pkg_entry.physical_key,
-        credentials,
-        use_multipart_checksums,
-    ).dict()
+    logger.info("calculate_pkg_entry_hash(%s): start", pkg_entry.physical_key)
+    pkg_entry.hash = invoke_hash_lambda(pkg_entry.physical_key, credentials).dict()
+    logger.info("calculate_pkg_entry_hash(%s): done", pkg_entry.physical_key)
 
 
-def calculate_pkg_hashes(pkg: quilt3.Package, use_multipart_checksums: bool):
+def calculate_pkg_hashes(pkg: quilt3.Package):
     entries = []
     for lk, entry in pkg.walk():
         if entry.hash is not None:
@@ -249,21 +251,20 @@ def calculate_pkg_hashes(pkg: quilt3.Package, use_multipart_checksums: bool):
 
         entries.append(entry)
 
+    logger.info("calculate_pkg_hashes: %s entries to hash", len(entries))
+
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=S3_HASH_LAMBDA_CONCURRENCY
     ) as pool:
         credentials = AWSCredentials.from_boto_session(user_boto_session.get())
         fs = [
-            pool.submit(
-                calculate_pkg_entry_hash,
-                entry,
-                credentials,
-                use_multipart_checksums,
-            )
+            pool.submit(calculate_pkg_entry_hash, entry, credentials)
             for entry in entries
         ]
         for f in concurrent.futures.as_completed(fs):
             f.result()
+
+    logger.info("calculate_pkg_hashes: done")
 
 
 # Isolated for test-ability.
@@ -291,13 +292,20 @@ def auth(f):
 
 def exception_handler(f):
     @functools.wraps(f)
-    def wrapper(event, _context):
+    def wrapper(event, context):
+        # XXX: make sure to disable in production to avoid leaking credentials
+        logger.info("event: %s", event)
+        logger.info("context: %s", context)
         try:
-            return {"result": f(event).dict()}
+            result = f(event)
+            logger.info("result: %s", result)
+            return {"result": result.dict()}
         except PkgpushException as e:
-            traceback.print_exc()
+            logger.exception("PkgpushException")
             return {"error": e.dict()}
         except pydantic.ValidationError as e:
+            # XXX: make it .info()?
+            logger.exception("ValidationError")
             # TODO: expose advanced pydantic error reporting capabilities
             return {
                 "error": {
@@ -357,7 +365,6 @@ class PackagePushParams(pydantic.BaseModel):
     message: T.Optional[NonEmptyStr] = None
     user_meta: T.Optional[T.Dict[str, T.Any]] = None
     workflow: T.Optional[str] = None
-    use_multipart_checksums: bool = False
 
     @property
     def workflow_normalized(self):
@@ -384,6 +391,8 @@ def _push_pkg_to_successor(
     pkg_max_size: int,
     pkg_max_files: int,
 ) -> PackagePushResult:
+    logger.info("_push_pkg_to_successor: %s -> %s", src_bucket, params)
+
     dst_registry_url = f"s3://{params.bucket}"
     dst_registry = get_registry(dst_registry_url)
     src_registry = get_registry(f"s3://{src_bucket}")
@@ -455,6 +464,8 @@ class PackagePromoteParams(PackagePushParams):
 @setup_telemetry
 @pydantic.validate_arguments
 def promote_package(params: PackagePromoteParams) -> PackagePushResult:
+    logger.info("promote_package(%s)", params)
+
     def get_pkg(src_registry: S3PackageRegistryV1):
         quilt3.util.validate_package_name(params.src.name)
 
@@ -511,12 +522,14 @@ class PackageFromFolderParams(PackagePushParams):
 @setup_telemetry
 @pydantic.validate_arguments
 def package_from_folder(params: PackageFromFolderParams) -> PackagePushResult:
+    logger.info("package_from_folder(%s)", params)
+
     def get_pkg(src_registry: S3PackageRegistryV1):
         p = quilt3.Package()
         for entry in params.entries:
             set_entry = p.set_dir if entry.is_dir else p.set
             set_entry(entry.logical_key, str(src_registry.base.join(entry.path)))
-        calculate_pkg_hashes(p, params.use_multipart_checksums)
+        calculate_pkg_hashes(p)
         return p
 
     return _push_pkg_to_successor(
@@ -560,12 +573,13 @@ def request_from_file(request_type: str, version_id: str):
                 VersionId=version_id,
             )
         except Exception:
-            logger.exception("error while removing user request file from S3")
+            logger.exception("Error while removing user request file from S3")
 
 
 VersionId = pydantic.constr(strip_whitespace=True, min_length=1, max_length=1024)
 
 
+# XXX: move to shared
 def large_request_handler(request_type: str):
     def inner(f: T.Callable[[T.IO[bytes]], T.Any]):
         @functools.wraps(f)
@@ -596,6 +610,8 @@ class PackageConstructEntry(pydantic.BaseModel):
 @large_request_handler("create-package")
 def create_package(req_file: T.IO[bytes]) -> PackagePushResult:
     params = PackagePushParams.parse_raw(next(req_file))
+    logger.info("create_package(%s)", params)
+
     registry_url = f"s3://{params.bucket}"
     try:
         package_registry = get_registry(registry_url)
@@ -658,6 +674,8 @@ def create_package(req_file: T.IO[bytes]) -> PackagePushResult:
                         },
                     )
 
+        logger.info("pkg._validate_with_workflow")
+
         pkg._validate_with_workflow(
             registry=package_registry,
             workflow=params.workflow_normalized,
@@ -668,7 +686,7 @@ def create_package(req_file: T.IO[bytes]) -> PackagePushResult:
     except quilt3.util.QuiltException as qe:
         raise PkgpushException.from_quilt_exception(qe)
 
-    calculate_pkg_hashes(pkg, params.use_multipart_checksums)
+    calculate_pkg_hashes(pkg)
     try:
         top_hash = pkg._build(
             name=params.name,

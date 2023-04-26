@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import asyncio
 import base64
 import contextlib
@@ -7,12 +8,13 @@ import enum
 import functools
 import hashlib
 import math
-import traceback
+import os
 import typing as T
 
 import aiobotocore.config
 import aiobotocore.response
 import aiobotocore.session
+import botocore.exceptions
 import pydantic
 import tenacity
 import types_aiobotocore_s3.type_defs as T_S3TypeDefs
@@ -22,8 +24,7 @@ from t4_lambda_shared.utils import get_quilt_logger
 
 logger = get_quilt_logger()
 
-# TODO: get from env
-DEFAULT_CONCURRENCY = 500
+DEFAULT_CONCURRENCY = int(os.environ["MPU_CONCURRENCY"])
 
 
 S3: contextvars.ContextVar[S3Client] = contextvars.ContextVar("s3")
@@ -146,7 +147,7 @@ MIN_PART_SIZE = 1024**2 * 8
 MAX_PARTS = 10000  # Maximum number of parts per upload supported by S3
 
 
-# XXX: import this logic from quilt3
+# XXX: import this logic from quilt3 when it's available
 def get_part_size(file_size: int) -> T.Optional[int]:
     if file_size < MIN_PART_SIZE:
         return None  # use single-part upload (and plain SHA256 hash)
@@ -253,7 +254,7 @@ async def compute_part_checksums(
     return checksums, upload_part.retry.statistics
 
 
-async def create_mpu(target: S3ObjectDestination) -> MPURef:
+async def _create_mpu(target: S3ObjectDestination) -> MPURef:
     upload_data = await S3.get().create_multipart_upload(
         **target.boto_args,
         ChecksumAlgorithm="SHA256",
@@ -261,10 +262,41 @@ async def create_mpu(target: S3ObjectDestination) -> MPURef:
     return MPURef(bucket=target.bucket, key=target.key, id=upload_data["UploadId"])
 
 
+MPUDstError = T.Tuple[S3ObjectDestination, botocore.exceptions.ClientError]
+
+MPUTarget = T.Union[S3ObjectDestination, T.List[S3ObjectDestination]]
+
+
+async def create_mpu(target: MPUTarget) -> MPURef:
+    dsts = target if isinstance(target, list) else [target]
+
+    errors: T.List[MPUDstError] = []
+
+    for dst in dsts:
+        try:
+            return await _create_mpu(dst)
+        except botocore.exceptions.ClientError as ex:
+            errors.append((dst, ex))
+
+    raise S3hashException(
+        "MPUError",
+        {
+            "errors": [
+                {
+                    "dst": dst.dict(),
+                    "error": str(ex),
+                }
+                for dst, ex in errors
+            ]
+        },
+    )
+
+
 STREAM_CHUNK_SIZE = 128 * 2**10
 
 
 async def compute_checksum_stream(location: S3ObjectSource) -> Checksum:
+    logger.info("compute_checksums_stream")
     resp = await S3.get().get_object(**location.boto_args)
     async with resp["Body"] as stream:
         stream: aiobotocore.response.StreamingBody
@@ -276,20 +308,26 @@ async def compute_checksum_stream(location: S3ObjectSource) -> Checksum:
 
 class ChecksumResult(pydantic.BaseModel):
     checksum: Checksum
-    mpu: T.Optional[MPURef] = None
-    retry_stats: T.Any = None
+    stats: T.Optional[dict] = None
 
 
 # XXX: need a consistent way to serialize / deserialize exceptions
 def lambda_wrapper(f):
     @functools.wraps(f)
-    def wrapper(event, _context):
+    def wrapper(event, context):
+        # XXX: make sure to disable in production to avoid leaking credentials
+        logger.info("event: %s", event)
+        logger.info("context: %s", context)
         try:
-            return {"result": asyncio.run(f(**event)).dict()}
+            result = asyncio.run(f(**event))
+            logger.info("result: %s", result)
+            return {"result": result.dict()}
         except S3hashException as e:
-            traceback.print_exc()
+            logger.exception("S3hashException")
             return {"error": e.dict()}
         except pydantic.ValidationError as e:
+            # XXX: make it .info()?
+            logger.exception("ValidationError")
             # TODO: expose advanced pydantic error reporting capabilities
             return {
                 "error": {
@@ -302,46 +340,55 @@ def lambda_wrapper(f):
 
 
 # XXX: move decorators to shared?
-# XXX: move reusable models/dataclasses to shared?
+# XXX: move reusable types/models to shared?
 @lambda_wrapper
 @pydantic.validate_arguments
 async def lambda_handler(
+    *,
     credentials: AWSCredentials,
     location: S3ObjectSource,
-    target: T.Optional[S3ObjectDestination] = None,
-    keep_mpu: T.Optional[bool] = None,
-    use_multipart_checksums: T.Optional[bool] = None,
+    multipart: bool,
+    target: T.Optional[MPUTarget] = None,
     concurrency: T.Optional[pydantic.PositiveInt] = None,
 ) -> ChecksumResult:
-    if keep_mpu is None:
-        keep_mpu = False
-    if use_multipart_checksums is None:
-        use_multipart_checksums = False
     if concurrency is None:
         concurrency = DEFAULT_CONCURRENCY
 
+    logger.info(
+        "arguments: %s",
+        {
+            "location": location,
+            "multipart": multipart,
+            "target": target,
+            "concurrency": concurrency,
+        },
+    )
+
     async with aio_context(credentials, concurrency):
-        if not use_multipart_checksums and target is None:
+        if not multipart and target is None:
             checksum = await compute_checksum_stream(location)
             return ChecksumResult(checksum=checksum)
 
-        if target is None:
+        if target is None or isinstance(target, list) and len(target) == 0:
             raise S3hashException(
                 "InvalidInputParameters",
                 {"details": "target must be specified for multipart checksums"},
             )
 
         part_defs = (
-            await get_parts_for_location(location)
-            if use_multipart_checksums
-            else PARTS_SINGLE
+            await get_parts_for_location(location) if multipart else PARTS_SINGLE
         )
+
+        logger.info("parts: %s", len(part_defs))
 
         checksum = await get_existing_checksum(location, part_defs)
         if checksum is not None:
+            logger.info("got existing checksum")
             return ChecksumResult(checksum=checksum)
 
         mpu = await create_mpu(target)
+
+        logger.info("MPU created: %s", mpu)
 
         part_checksums, retry_stats = await compute_part_checksums(
             mpu,
@@ -349,13 +396,16 @@ async def lambda_handler(
             part_defs,
         )
 
+        logger.info("got checksums. retry stats: %s", retry_stats)
+
         checksum = Checksum.for_parts(part_checksums, part_defs)
 
-        if not keep_mpu:
-            try:
-                await S3.get().abort_multipart_upload(**mpu.boto_args)
-                mpu = None
-            except Exception:
-                logger.exception("Error aborting MPU")
+        try:
+            await S3.get().abort_multipart_upload(**mpu.boto_args)
+        except Exception:
+            # XXX: send to sentry
+            logger.exception("Error aborting MPU")
 
-        return ChecksumResult(checksum=checksum, mpu=mpu, retry_stats=retry_stats)
+        # TODO: expose perf (timing) stats
+        stats = {"retry": retry_stats}
+        return ChecksumResult(checksum=checksum, stats=stats)
