@@ -58,7 +58,6 @@ const blobLimit = pLimit(8)
 
 async function hashBlob(blob: Blob) {
   const buf = await blob.arrayBuffer()
-  // XXX: consider using hashwasm for stream-based hashing to support larger files
   return window.crypto.subtle.digest('SHA-256', buf)
 }
 
