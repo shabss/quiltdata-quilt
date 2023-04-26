@@ -344,7 +344,9 @@ async def lambda_handler(
         mpu = await create_mpu(target)
 
         part_checksums, retry_stats = await compute_part_checksums(
-            mpu, location, part_defs
+            mpu,
+            location,
+            part_defs,
         )
 
         checksum = Checksum.for_parts(part_checksums, part_defs)

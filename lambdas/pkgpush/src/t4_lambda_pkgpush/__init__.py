@@ -118,8 +118,6 @@ TopHash = pydantic.constr(
     to_lower=True,
 )
 
-EllipsisType = type(...)
-
 
 class AWSCredentials(pydantic.BaseModel):
     key: NonEmptyStr
@@ -190,11 +188,15 @@ class ChecksumResult(pydantic.BaseModel):
     retry_stats: T.Any = None
 
 
-def invoke_hash_lambda(pk: PhysicalKey, use_multipart_checksums: bool) -> Checksum:
+def invoke_hash_lambda(
+    pk: PhysicalKey,
+    credentials: AWSCredentials,
+    use_multipart_checksums: bool,
+) -> Checksum:
     resp = lambda_.invoke(
         FunctionName=S3_HASH_LAMBDA,
         Payload=S3HashLambdaParams(
-            credentials=AWSCredentials.from_boto_session(user_boto_session.get()),
+            credentials=credentials,
             location=S3ObjectSource.from_pk(pk),
             # XXX: get target from selector_fn or smth?
             target=S3ObjectDestination(bucket=SERVICE_BUCKET, key=SCRATCH_KEY),
@@ -215,6 +217,18 @@ def invoke_hash_lambda(pk: PhysicalKey, use_multipart_checksums: bool) -> Checks
         logger.info("S3HashLambda retry stats: %s", result.retry_stats)
 
     return result.checksum
+
+
+def calculate_pkg_entry_hash(
+    pkg_entry: quilt3.packages.PackageEntry,
+    credentials: AWSCredentials,
+    use_multipart_checksums: bool,
+):
+    pkg_entry.hash = invoke_hash_lambda(
+        pkg_entry.physical_key,
+        credentials,
+        use_multipart_checksums,
+    ).dict()
 
 
 def calculate_pkg_hashes(pkg: quilt3.Package, use_multipart_checksums: bool):
@@ -238,29 +252,18 @@ def calculate_pkg_hashes(pkg: quilt3.Package, use_multipart_checksums: bool):
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=S3_HASH_LAMBDA_CONCURRENCY
     ) as pool:
+        credentials = AWSCredentials.from_boto_session(user_boto_session.get())
         fs = [
             pool.submit(
-                contextvars.copy_context().run,
-                functools.partial(
-                    calculate_pkg_entry_hash,
-                    entry,
-                    use_multipart_checksums,
-                ),
+                calculate_pkg_entry_hash,
+                entry,
+                credentials,
+                use_multipart_checksums,
             )
             for entry in entries
         ]
         for f in concurrent.futures.as_completed(fs):
             f.result()
-
-
-def calculate_pkg_entry_hash(
-    pkg_entry: quilt3.packages.PackageEntry,
-    use_multipart_checksums: bool,
-):
-    pkg_entry.hash = invoke_hash_lambda(
-        pkg_entry.physical_key,
-        use_multipart_checksums,
-    ).dict()
 
 
 # Isolated for test-ability.
