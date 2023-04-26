@@ -369,12 +369,6 @@ function PackageCreationForm({
       })),
       R.sortBy(R.prop('logicalKey')),
     )
-    console.log('entries', {
-      files,
-      uploadedEntries,
-      s3Entries,
-      allEntries,
-    })
 
     try {
       const { packageConstruct: r } = await constructPackage({
@@ -390,7 +384,6 @@ function PackageCreationForm({
               : workflow.slug === workflows.notSelected
               ? ''
               : workflow.slug,
-          useMultipartChecksums: cfg.useMultipartChecksums,
         },
         src: {
           entries: allEntries,

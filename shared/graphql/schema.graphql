@@ -283,7 +283,7 @@ type Query {
   potentialCollaborators: [Collaborator!]!
   packages(bucket: String!, filter: String): PackageList
   package(bucket: String!, name: String!): Package
-  checksum(bucket: String!, key: String!, version: String!, multipart: Boolean! = False): ChecksumResult!
+  checksum(bucket: String!, key: String!, version: String!, multipart: Boolean!): ChecksumResult!
   policies: [Policy!]! @admin
   policy(id: ID!): Policy @admin
   roles: [Role!]! @admin
@@ -513,7 +513,6 @@ input PackagePushParams {
   workflow: String
   bucket: String!
   name: String!
-  useMultipartChecksums: Boolean! = False
 }
 
 input PackageEntryHash {

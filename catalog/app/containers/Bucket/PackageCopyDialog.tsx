@@ -5,7 +5,6 @@ import * as RF from 'react-final-form'
 import * as M from '@material-ui/core'
 
 import * as Intercom from 'components/Intercom'
-import cfg from 'constants/config'
 import * as AWS from 'utils/AWS'
 import * as Data from 'utils/Data'
 import { useMutation } from 'utils/GraphQL'
@@ -141,7 +140,6 @@ function DialogForm({
               : workflow.slug === workflows.notSelected
               ? ''
               : workflow.slug,
-          useMultipartChecksums: cfg.useMultipartChecksums,
         },
         src: {
           bucket,

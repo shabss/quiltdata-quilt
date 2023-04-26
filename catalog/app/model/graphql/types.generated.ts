@@ -506,7 +506,6 @@ export interface PackagePushParams {
   readonly workflow: Maybe<Scalars['String']>
   readonly bucket: Scalars['String']
   readonly name: Scalars['String']
-  readonly useMultipartChecksums: Scalars['Boolean']
 }
 
 export interface PackagePushSuccess {
