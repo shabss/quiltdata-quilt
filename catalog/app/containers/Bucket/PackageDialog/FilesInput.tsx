@@ -35,9 +35,9 @@ const COLORS = {
 interface FileWithHash extends File {
   hash: {
     ready: boolean
-    value?: Model.PackageEntryHash
+    value?: Model.Checksum
     error?: Error
-    promise: Promise<Model.PackageEntryHash | undefined>
+    promise: Promise<Model.Checksum | undefined>
   }
   meta?: Types.JsonRecord
 }

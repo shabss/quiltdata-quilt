@@ -25,14 +25,14 @@ function getPartSize(fileSize: number): number | null {
   return partSize
 }
 
-const singlepart = (value: ArrayBuffer): Model.PackageEntryHash => ({
+const singlepart = (value: ArrayBuffer): Model.Checksum => ({
   value: Buffer.from(value).toString('hex'),
-  type: Model.HASH_TYPE_SP,
+  type: Model.CHECKSUM_TYPE_SP,
 })
 
-const multipart = (value: ArrayBuffer, partCount: number): Model.PackageEntryHash => ({
+const multipart = (value: ArrayBuffer, partCount: number): Model.Checksum => ({
   value: `${Buffer.from(value).toString('base64')}-${partCount}`,
-  type: Model.HASH_TYPE_MP,
+  type: Model.CHECKSUM_TYPE_MP,
 })
 
 function mergeBuffers(buffers: ArrayBuffer[]) {
@@ -57,7 +57,7 @@ async function hashBlob(blob: Blob) {
 
 const hashBlobLimit = (blob: Blob) => blobLimit(hashBlob, blob)
 
-async function computeFileChecksum(f: File): Promise<Model.PackageEntryHash> {
+async function computeFileChecksum(f: File): Promise<Model.Checksum> {
   if (!window.crypto?.subtle?.digest) throw new Error('Crypto API unavailable')
 
   const partSize = getPartSize(f.size)
