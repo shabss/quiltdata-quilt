@@ -25,6 +25,11 @@ from t4_lambda_shared.utils import get_quilt_logger
 logger = get_quilt_logger()
 
 DEFAULT_CONCURRENCY = int(os.environ["MPU_CONCURRENCY"])
+MULTIPART_CHECKSUMS = os.environ["MULTIPART_CHECKSUMS"] == "true"
+SERVICE_BUCKET = os.environ["SERVICE_BUCKET"]
+
+SCRATCH_KEY_SERVICE = "user-requests/checksum-upload-tmp"
+SCRATCH_KEY_PER_BUCKET = ".quilt/.checksum-upload-tmp"
 
 
 S3: contextvars.ContextVar[S3Client] = contextvars.ContextVar("s3")
@@ -229,11 +234,7 @@ async def get_parts_for_location(location: S3ObjectSource) -> T.List[PartDef]:
 
 
 @tenacity.retry
-async def upload_part(
-    mpu: MPURef,
-    src: S3ObjectSource,
-    part: PartDef,
-) -> bytes:
+async def upload_part(mpu: MPURef, src: S3ObjectSource, part: PartDef) -> bytes:
     res = await S3.get().upload_part_copy(
         **mpu.boto_args,
         **part.boto_args,
@@ -262,15 +263,23 @@ async def _create_mpu(target: S3ObjectDestination) -> MPURef:
     return MPURef(bucket=target.bucket, key=target.key, id=upload_data["UploadId"])
 
 
+def get_mpu_dsts(src: S3ObjectSource, target: T.Optional[S3ObjectDestination]) -> T.List[S3ObjectDestination]:
+    dsts = [
+        S3ObjectDestination(bucket=src.bucket, key=SCRATCH_KEY_PER_BUCKET),
+        S3ObjectDestination(bucket=SERVICE_BUCKET, key=SCRATCH_KEY_SERVICE),
+    ]
+    if target is not None:
+        dsts.insert(0, target)
+    return dsts
+
+
 MPUDstError = T.Tuple[S3ObjectDestination, botocore.exceptions.ClientError]
 
-MPUTarget = T.Union[S3ObjectDestination, T.List[S3ObjectDestination]]
 
+async def create_mpu(src: S3ObjectSource, target: T.Optional[S3ObjectDestination]) -> MPURef:
+    dsts = get_mpu_dsts(src, target)
 
-async def create_mpu(target: MPUTarget) -> MPURef:
-    dsts = target if isinstance(target, list) else [target]
-
-    errors: T.List[MPUDstError] = []
+    errors: T.List[T.Tuple[S3ObjectDestination, botocore.exceptions.ClientError]] = []
 
     for dst in dsts:
         try:
@@ -278,32 +287,9 @@ async def create_mpu(target: MPUTarget) -> MPURef:
         except botocore.exceptions.ClientError as ex:
             errors.append((dst, ex))
 
-    raise S3hashException(
-        "MPUError",
-        {
-            "errors": [
-                {
-                    "dst": dst.dict(),
-                    "error": str(ex),
-                }
-                for dst, ex in errors
-            ]
-        },
-    )
-
-
-STREAM_CHUNK_SIZE = 128 * 2**10
-
-
-async def compute_checksum_stream(location: S3ObjectSource) -> Checksum:
-    logger.info("compute_checksums_stream")
-    resp = await S3.get().get_object(**location.boto_args)
-    async with resp["Body"] as stream:
-        stream: aiobotocore.response.StreamingBody
-        hashobj = hashlib.sha256()
-        async for chunk in stream.iter_chunks(chunk_size=STREAM_CHUNK_SIZE):
-            hashobj.update(chunk)
-        return Checksum.singlepart(hashobj.digest())
+    raise S3hashException("MPUError", {
+        "errors": [{"dst": dst.dict(), "error": str(ex)} for dst, ex in errors],
+    })
 
 
 class ChecksumResult(pydantic.BaseModel):
@@ -347,8 +333,7 @@ async def lambda_handler(
     *,
     credentials: AWSCredentials,
     location: S3ObjectSource,
-    multipart: bool,
-    target: T.Optional[MPUTarget] = None,
+    target: T.Optional[S3ObjectDestination] = None,
     concurrency: T.Optional[pydantic.PositiveInt] = None,
 ) -> ChecksumResult:
     if concurrency is None:
@@ -358,25 +343,17 @@ async def lambda_handler(
         "arguments: %s",
         {
             "location": location,
-            "multipart": multipart,
             "target": target,
             "concurrency": concurrency,
         },
     )
+    logger.info("MULTIPART_CHECKSUMS: %s", MULTIPART_CHECKSUMS)
 
     async with aio_context(credentials, concurrency):
-        if not multipart and target is None:
-            checksum = await compute_checksum_stream(location)
-            return ChecksumResult(checksum=checksum)
-
-        if target is None or isinstance(target, list) and len(target) == 0:
-            raise S3hashException(
-                "InvalidInputParameters",
-                {"details": "target must be specified for multipart checksums"},
-            )
-
         part_defs = (
-            await get_parts_for_location(location) if multipart else PARTS_SINGLE
+            await get_parts_for_location(location)
+            if MULTIPART_CHECKSUMS
+            else PARTS_SINGLE
         )
 
         logger.info("parts: %s", len(part_defs))
@@ -386,7 +363,7 @@ async def lambda_handler(
             logger.info("got existing checksum")
             return ChecksumResult(checksum=checksum)
 
-        mpu = await create_mpu(target)
+        mpu = await create_mpu(location, target)
 
         logger.info("MPU created: %s", mpu)
 

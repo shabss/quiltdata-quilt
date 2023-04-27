@@ -48,14 +48,11 @@ S3_HASH_LAMBDA_CONCURRENCY = int(os.environ["S3_HASH_LAMBDA_CONCURRENCY"])
 S3_HASH_LAMBDA_MAX_FILE_SIZE_BYTES = int(
     os.environ["S3_HASH_LAMBDA_MAX_FILE_SIZE_BYTES"]
 )
-MULTIPART_CHECKSUMS = os.environ["MULTIPART_CHECKSUMS"] == "true"
 
 S3_HASH_LAMBDA_READ_TIMEOUT = 15 * 60  # Max lambda duration.
 
 SERVICE_BUCKET = os.environ["SERVICE_BUCKET"]
 USER_REQUESTS_PREFIX = "user-requests/"
-SCRATCH_KEY = USER_REQUESTS_PREFIX + "checksum-upload-tmp"
-SCRATCH_KEY_PER_BUCKET = ".quilt/.checksum-upload-tmp"
 
 logger = get_quilt_logger()
 
@@ -160,14 +157,10 @@ class S3ObjectDestination(pydantic.BaseModel):
     key: str
 
 
-MPUTarget = T.Union[S3ObjectDestination, T.List[S3ObjectDestination]]
-
-
 class S3HashLambdaParams(pydantic.BaseModel):
     credentials: AWSCredentials
     location: S3ObjectSource
-    multipart: bool
-    target: T.Optional[MPUTarget] = None
+    target: T.Optional[S3ObjectDestination] = None
     concurrency: T.Optional[pydantic.PositiveInt] = None
 
 
@@ -192,14 +185,6 @@ class ChecksumResult(pydantic.BaseModel):
     stats: T.Optional[dict] = None
 
 
-def target_for_pk(pk: PhysicalKey):
-    # XXX: get target from selector_fn or smth?
-    return [
-        S3ObjectDestination(bucket=pk.bucket, key=SCRATCH_KEY_PER_BUCKET),
-        S3ObjectDestination(bucket=SERVICE_BUCKET, key=SCRATCH_KEY),
-    ]
-
-
 def invoke_hash_lambda(pk: PhysicalKey, credentials: AWSCredentials) -> Checksum:
     logger.info("invoke hash lambda")
     resp = lambda_.invoke(
@@ -207,8 +192,6 @@ def invoke_hash_lambda(pk: PhysicalKey, credentials: AWSCredentials) -> Checksum
         Payload=S3HashLambdaParams(
             credentials=credentials,
             location=S3ObjectSource.from_pk(pk),
-            target=target_for_pk(pk),
-            multipart=MULTIPART_CHECKSUMS,
         ).json(exclude_defaults=True),
     )
 
@@ -545,27 +528,30 @@ def package_from_folder(params: PackageFromFolderParams) -> PackagePushResult:
 def request_from_file(request_type: str, version_id: str):
     user_request_key = USER_REQUESTS_PREFIX + request_type
 
-    size = s3.head_object(
-        Bucket=SERVICE_BUCKET,
-        Key=user_request_key,
-        VersionId=version_id,
-    )["ContentLength"]
-    if size > LAMBDA_TMP_SPACE:
-        raise PkgpushException(
-            "RequestTooLarge",
-            {"size": size, "max_size": LAMBDA_TMP_SPACE},
-        )
+    try:
+        size = s3.head_object(
+            Bucket=SERVICE_BUCKET,
+            Key=user_request_key,
+            VersionId=version_id,
+        )["ContentLength"]
+        if size > LAMBDA_TMP_SPACE:
+            raise PkgpushException(
+                "RequestTooLarge",
+                {"size": size, "max_size": LAMBDA_TMP_SPACE},
+            )
 
-    # download file with user request using lambda's role
-    with tempfile.TemporaryFile() as tmp_file:
-        s3.download_fileobj(
-            SERVICE_BUCKET,
-            user_request_key,
-            tmp_file,
-            ExtraArgs={"VersionId": version_id},
-        )
-        tmp_file.seek(0)
-        yield tmp_file
+        # download file with user request using lambda's role
+        with tempfile.TemporaryFile() as tmp_file:
+            s3.download_fileobj(
+                SERVICE_BUCKET,
+                user_request_key,
+                tmp_file,
+                ExtraArgs={"VersionId": version_id},
+            )
+            tmp_file.seek(0)
+            yield tmp_file
+
+    finally:
         try:
             s3.delete_object(
                 Bucket=SERVICE_BUCKET,
