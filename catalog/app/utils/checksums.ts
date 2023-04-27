@@ -1,4 +1,3 @@
-import * as B64 from 'js-base64'
 import pLimit from 'p-limit'
 
 import cfg from 'constants/config'
@@ -26,18 +25,13 @@ function getPartSize(fileSize: number): number | null {
   return partSize
 }
 
-const toHex = (buf: ArrayBuffer) =>
-  Array.from(new Uint8Array(buf))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('')
-
 const singlepart = (value: ArrayBuffer): Model.PackageEntryHash => ({
-  value: toHex(value),
+  value: Buffer.from(value).toString('hex'),
   type: Model.HASH_TYPE_SP,
 })
 
 const multipart = (value: ArrayBuffer, partCount: number): Model.PackageEntryHash => ({
-  value: `${B64.fromUint8Array(new Uint8Array(value))}-${partCount}`,
+  value: `${Buffer.from(value).toString('base64')}-${partCount}`,
   type: Model.HASH_TYPE_MP,
 })
 
