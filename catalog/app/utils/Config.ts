@@ -42,7 +42,7 @@ export interface ConfigJson {
   ssoAuth: AuthMethodConfig
   ssoProviders: string
 
-  useMultipartChecksums?: boolean
+  multipartChecksums?: boolean
 
   build_version?: string // not sure where this comes from
 }
@@ -90,7 +90,7 @@ const transformConfig = (cfg: ConfigJson) => ({
   noDownload: !!cfg.noDownload,
   noOverviewImages: !!cfg.noOverviewImages,
   desktop: !!cfg.desktop,
-  useMultipartChecksums: !!cfg.useMultipartChecksums,
+  multipartChecksums: !!cfg.multipartChecksums,
 })
 
 export function prepareConfig(input: unknown) {

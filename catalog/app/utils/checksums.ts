@@ -10,7 +10,7 @@ const MAX_PARTS = 10000 // Maximum number of parts per upload supported by S3
 
 function getPartSize(fileSize: number): number | null {
   // use single-part upload (and plain SHA256 hash)
-  if (!cfg.useMultipartChecksums || fileSize < MIN_PART_SIZE) return null
+  if (!cfg.multipartChecksums || fileSize < MIN_PART_SIZE) return null
 
   // NOTE: in the case where fileSize is exactly equal to MIN_PART_SIZE
   // boto creates a 1-part multipart upload :shrug:
