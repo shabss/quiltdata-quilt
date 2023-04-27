@@ -2857,17 +2857,6 @@ export default {
                   },
                 },
               },
-              {
-                name: 'multipart',
-                type: {
-                  kind: 'NON_NULL',
-                  ofType: {
-                    kind: 'SCALAR',
-                    name: 'Boolean',
-                    ofType: null,
-                  },
-                },
-              },
             ],
           },
           {

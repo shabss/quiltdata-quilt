@@ -283,7 +283,7 @@ type Query {
   potentialCollaborators: [Collaborator!]!
   packages(bucket: String!, filter: String): PackageList
   package(bucket: String!, name: String!): Package
-  checksum(bucket: String!, key: String!, version: String!, multipart: Boolean!): ChecksumResult!
+  checksum(bucket: String!, key: String!, version: String!): ChecksumResult!
   policies: [Policy!]! @admin
   policy(id: ID!): Policy @admin
   roles: [Role!]! @admin

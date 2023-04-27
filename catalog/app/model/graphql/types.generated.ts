@@ -631,7 +631,6 @@ export interface QuerychecksumArgs {
   bucket: Scalars['String']
   key: Scalars['String']
   version: Scalars['String']
-  multipart: Scalars['Boolean']
 }
 
 export interface QuerypolicyArgs {
