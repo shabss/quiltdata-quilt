@@ -69,7 +69,6 @@ async function computeFileChecksum(f: File): Promise<Model.PackageEntryHash> {
   const parts: Blob[] = []
   let offset = 0
   while (offset < f.size) {
-    // XXX: mind off-by-1 errors
     const end = Math.min(offset + partSize, f.size)
     parts.push(f.slice(offset, end))
     offset = end
