@@ -188,6 +188,10 @@ jobs:
             python -m pip install -e lambdas/${{ matrix.path }}
           fi
           python -m pip install -r lambdas/${{ matrix.path }}/requirements.txt -r lambdas/${{ matrix.path }}/test-requirements.txt
+          # Simulate the lambda environment where we delete lots of things to keep the size down
+          site=$(python -m site --user-site)
+          find "$site" -name tests -type d -exec rm -r \{}
+          strip $(find "$site" -name '*.so.*')
       - name: Pytest
         run: |
           pytest --cov=lambdas lambdas/${{ matrix.path }}
