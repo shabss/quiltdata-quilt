@@ -60,10 +60,6 @@ export const passChange = {
   path: '/reset_password/:link',
   url: (link) => `/reset_password/${link}`,
 }
-export const ssoSignUp = {
-  path: '/signup-sso',
-  url: ({ provider, token, next }) => `/signup-sso${mkSearch({ provider, token, next })}`,
-}
 export const code = {
   path: '/code',
   url: () => '/code',
@@ -134,6 +130,10 @@ export const bucketPackageTree = {
         )}${mkSearch({ mode })}`
       : bucketPackageDetail.url(bucket, name),
 }
+export const bucketPackageEditor = {
+  path: `/b/:bucket/packages/:name(${PACKAGE_PATTERN})/edit/:revision?`,
+  url: (bucket, name, revision) => `/b/${bucket}/packages/${name}/edit/${revision}`,
+}
 export const bucketPackageRevisions = {
   path: `/b/:bucket/packages/:name(${PACKAGE_PATTERN})/revisions`,
   url: (bucket, name, { p } = {}) =>
@@ -193,10 +193,4 @@ export const adminSync = {
 export const adminStatus = {
   path: '/admin/status',
   url: () => '/admin/status',
-}
-
-// storybook
-export const storyBook = {
-  path: '/storybook',
-  url: () => '/storybook',
 }

@@ -4,7 +4,7 @@ import pLimit from 'p-limit'
 import * as R from 'ramda'
 import * as React from 'react'
 
-import * as Model from 'model'
+import type * as Model from 'model'
 import * as AWS from 'utils/AWS'
 import dissocBy from 'utils/dissocBy'
 import * as s3paths from 'utils/s3paths'
@@ -47,7 +47,25 @@ export const computeTotalProgress = (uploads: UploadsState): UploadTotalProgress
     }),
   )
 
-export function useUploads() {
+export interface Uploads {
+  uploads: UploadsState
+  upload: (x: {
+    files: { path: string; file: LocalFile }[]
+    bucket: string
+    prefix: string
+    getMeta?: (path: string) => Model.EntryMeta | undefined
+  }) => Promise<Record<string, Model.PackageEntry>>
+  progress: {
+    total: number
+    loaded: number
+    percent: number
+  }
+  remove: (path: string) => void
+  removeByPrefix: (prefix: string) => void
+  reset: () => void
+}
+
+export function useUploads(): Uploads {
   const s3 = AWS.S3.use()
 
   const [uploads, setUploads] = React.useState<UploadsState>({})
@@ -73,7 +91,7 @@ export function useUploads() {
       files: { path: string; file: LocalFile }[]
       bucket: string
       prefix: string
-      getMeta?: (path: string) => object | undefined
+      getMeta?: (path: string) => Model.EntryMeta | undefined
     }) => {
       const limit = pLimit(2)
       let rejected = false

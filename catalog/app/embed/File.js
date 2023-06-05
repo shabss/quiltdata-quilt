@@ -7,14 +7,14 @@ import * as React from 'react'
 import { Link } from 'react-router-dom'
 import * as M from '@material-ui/core'
 
-import { copyWithoutSpaces, render as renderCrumbs } from 'components/BreadCrumbs'
+import * as BreadCrumbs from 'components/BreadCrumbs'
 import Message from 'components/Message'
 import * as Preview from 'components/Preview'
 import Sparkline from 'components/Sparkline'
+import cfg from 'constants/config'
 import * as Notifications from 'containers/Notifications'
 import * as AWS from 'utils/AWS'
 import AsyncResult from 'utils/AsyncResult'
-import * as Config from 'utils/Config'
 import { useData } from 'utils/Data'
 import * as NamedRoutes from 'utils/NamedRoutes'
 import * as SVG from 'utils/SVG'
@@ -34,7 +34,6 @@ import * as requests from 'containers/Bucket/requests'
 
 import * as EmbedConfig from './EmbedConfig'
 import * as Overrides from './Overrides'
-import getCrumbs from './getCrumbs'
 import * as ipc from './ipc'
 
 const defaults = {
@@ -63,7 +62,6 @@ const useVersionInfoStyles = M.makeStyles(({ typography }) => ({
 function VersionInfo({ bucket, path, version }) {
   const s3 = AWS.S3.use()
   const { urls } = NamedRoutes.use()
-  const cfg = Config.use()
   const { push } = Notifications.use()
   const messageParent = ipc.useMessageParent()
 
@@ -238,7 +236,7 @@ function Meta({ bucket, path, version }) {
   return <FileView.ObjectMeta data={data.result} />
 }
 
-function Analytics({ analyticsBucket, bucket, path }) {
+function Analytics({ bucket, path }) {
   const [cursor, setCursor] = React.useState(null)
   const s3 = AWS.S3.use()
   const today = React.useMemo(() => new Date(), [])
@@ -249,7 +247,6 @@ function Analytics({ analyticsBucket, bucket, path }) {
     )
   const data = useData(requests.objectAccessCounts, {
     s3,
-    analyticsBucket,
     bucket,
     path,
     today,
@@ -345,6 +342,9 @@ const useStyles = M.makeStyles((t) => ({
   button: {
     marginLeft: t.spacing(2),
   },
+  preview: {
+    width: '100%',
+  },
 }))
 
 const previewOptions = { context: Preview.CONTEXT.FILE }
@@ -355,11 +355,10 @@ export default function File({
   },
   location,
 }) {
-  const cfg = EmbedConfig.use()
+  const ecfg = EmbedConfig.use()
   const { version } = parseSearch(location.search)
   const classes = useStyles()
   const { urls } = NamedRoutes.use()
-  const { analyticsBucket, noDownload } = Config.use()
   const s3 = AWS.S3.use()
 
   const path = s3paths.decode(encodedPath)
@@ -403,7 +402,7 @@ export default function File({
   })
 
   const downloadable =
-    !noDownload &&
+    !cfg.noDownload &&
     versionExistsData.case({
       _: () => false,
       Ok: requests.ObjectExistence.case({
@@ -429,12 +428,23 @@ export default function File({
         callback(AsyncResult.Err(Preview.PreviewError.InvalidVersion({ handle }))),
     })
 
+  const scoped = ecfg.scope && path.startsWith(ecfg.scope)
+  const scopedPath = scoped ? path.substring(ecfg.scope.length) : path
+  const getSegmentRoute = React.useCallback(
+    (segPath) => urls.bucketDir(bucket, `${scoped ? ecfg.scope : ''}${segPath}`),
+    [bucket, ecfg.scope, scoped, urls],
+  )
+  const crumbs = BreadCrumbs.use(
+    s3paths.up(scopedPath),
+    getSegmentRoute,
+    scoped ? basename(ecfg.scope) : 'ROOT',
+    { tailLink: true, tailSeparator: true },
+  )
+
   return (
     <FileView.Root>
-      <div className={classes.crumbs} onCopy={copyWithoutSpaces}>
-        {renderCrumbs(
-          getCrumbs({ bucket, path, urls, scope: cfg.scope, excludeBase: true }),
-        )}
+      <div className={classes.crumbs} onCopy={BreadCrumbs.copyWithoutSpaces}>
+        {BreadCrumbs.render(crumbs)}
       </div>
       <div className={classes.topBar}>
         <div className={classes.name}>
@@ -473,18 +483,20 @@ export default function File({
         Ok: requests.ObjectExistence.case({
           Exists: () => (
             <>
-              {!cfg.hideCode && <Code>{code}</Code>}
-              {!cfg.hideAnalytics && !!analyticsBucket && (
-                <Analytics {...{ analyticsBucket, bucket, path }} />
+              {!ecfg.hideCode && <Code>{code}</Code>}
+              {!ecfg.hideAnalytics && !!cfg.analyticsBucket && (
+                <Analytics {...{ bucket, path }} />
               )}
               <Section icon="remove_red_eye" heading="Preview" defaultExpanded>
-                {versionExistsData.case({
-                  _: () => <CenteredProgress />,
-                  Err: (e) => {
-                    throw e
-                  },
-                  Ok: withPreview(renderPreview()),
-                })}
+                <div className={classes.preview}>
+                  {versionExistsData.case({
+                    _: () => <CenteredProgress />,
+                    Err: (e) => {
+                      throw e
+                    },
+                    Ok: withPreview(renderPreview()),
+                  })}
+                </div>
               </Section>
               <Meta bucket={bucket} path={path} version={version} />
             </>

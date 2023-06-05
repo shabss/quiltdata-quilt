@@ -14,6 +14,7 @@
 * [Getting Data from a Package](walkthrough/getting-data-from-a-package.md)
 * [Working with the Catalog](walkthrough/working-with-the-catalog.md)
 * [Working with a Bucket](walkthrough/working-with-a-bucket.md)
+* [Working with Elasticsearch](walkthrough/working-with-elasticsearch.md)
 
 ### API Reference
 * [quilt3](api-reference/api.md)
@@ -21,10 +22,12 @@
 * [quilt3.Bucket](api-reference/Bucket.md)
 * [CLI, environment](api-reference/cli.md)
 * [Known limitations](api-reference/limitations.md)
+* [Custom SSL certificates](api-reference/custom-ssl-certificates.md)
 
 ### Catalog
 * [Admin UI](Catalog/Admin.md)
 * [Configuration](Catalog/Preferences.md)
+* [Working with files](Catalog/FileBrowser.md)
 * [Embed](Catalog/Embed.md)
 * [Metadata for teams](Catalog/Metadata.md)
 * [Preview](Catalog/Preview.md)
@@ -46,8 +49,12 @@
 * [Enterprise install](technical-reference.md)
 * [S3 Events, EventBridge](EventBridge.md)
 * [Cross-account access](CrossAccount.md)
+* [Restrict access to bucket prefixes](advanced-features/s3-prefix-permissions.md)
 * [Querying Metadata with Athena](advanced-features/athena.md)
 * [S3 Bucket Organization](advanced-features/s3-bucket-organization.md)
+* [Event-driven packaging](advanced-features/event-driven-packaging.md)
+* [GxP & Quilt](advanced-features/good-practice.md)
+* [Private endpoints](advanced-features/private-endpoint-access.md)
 
 ### More
 * [Frequently Asked Questions](FAQ.md)

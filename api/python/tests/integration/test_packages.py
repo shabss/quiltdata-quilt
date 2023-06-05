@@ -1625,6 +1625,38 @@ class PackageTest(QuiltTestCase):
         Path('test/blah').unlink()
         assert pkg.verify('test')
 
+    def test_verify_poo_hash_type(self):
+        expected_err_msg = "Unsupported hash type: '💩'. Supported types: SHA256. Try to update quilt3."
+
+        self.patch_local_registry('shorten_top_hash', return_value='7a67ff4')
+        pkg = Package()
+
+        pkg.set('foo', b'Hello, World!')
+        pkg.build('quilt/test')
+
+        pkg['foo'].hash['type'] = '💩'
+
+        def _test_verify_fails(*args, **kwargs):
+            with pytest.raises(QuiltException) as excinfo:
+                pkg.verify(*args, **kwargs)
+            assert str(excinfo.value) == expected_err_msg
+
+        Package.install('quilt/test', LOCAL_REGISTRY, dest='test')
+        _test_verify_fails('test')
+        _test_verify_fails('test', extra_files_ok=True)
+
+        Path('test/blah').write_text('123')
+        _test_verify_fails('test')
+        _test_verify_fails('test', extra_files_ok=True)
+
+        Path('test/foo').write_text('123')
+        _test_verify_fails('test')
+        _test_verify_fails('test', extra_files_ok=True)
+
+        Path('test/blah').unlink()
+        _test_verify_fails('test')
+        _test_verify_fails('test', extra_files_ok=True)
+
     @patch('quilt3.packages.calculate_sha256')
     def test_fix_sha256_fail(self, mocked_calculate_sha256):
         data = b'Hello, World!'
@@ -1816,6 +1848,73 @@ class PackageTest(QuiltTestCase):
         assert Package.load(
             BytesIO(push_manifest_mock.call_args[0][2])
         )[lk].physical_key == PhysicalKey(dest_bucket, dest_key, version)
+
+    @patch('quilt3.workflows.validate', mock.MagicMock(return_value=None))
+    @patch('quilt3.Package._calculate_top_hash', mock.MagicMock(return_value=mock.sentinel.top_hash))
+    def test_push_selector_fn_false(self):
+        pkg_name = 'foo/bar'
+        lk = 'foo'
+        src_bucket = 'src-bucket'
+        src_key = 'foo.txt'
+        src_version = '1'
+        dst_bucket = 'dst-bucket'
+        pkg = Package()
+        with patch('quilt3.packages.get_size_and_version', return_value=(0, src_version)):
+            pkg.set(lk, f's3://{src_bucket}/{src_key}')
+
+        selector_fn = mock.MagicMock(return_value=False)
+        push_manifest_mock = self.patch_s3_registry('push_manifest')
+        self.patch_s3_registry('shorten_top_hash', return_value='7a67ff4')
+        with patch('quilt3.packages.calculate_sha256', return_value=["a" * 64]):
+            pkg.push(pkg_name, registry=f's3://{dst_bucket}', selector_fn=selector_fn, force=True)
+
+        selector_fn.assert_called_once_with(lk, pkg[lk])
+        push_manifest_mock.assert_called_once_with(pkg_name, mock.sentinel.top_hash, ANY)
+        assert Package.load(
+            BytesIO(push_manifest_mock.call_args[0][2])
+        )[lk].physical_key == PhysicalKey(src_bucket, src_key, src_version)
+
+    @patch('quilt3.workflows.validate', mock.MagicMock(return_value=None))
+    @patch('quilt3.Package._calculate_top_hash', mock.MagicMock(return_value=mock.sentinel.top_hash))
+    def test_push_selector_fn_true(self):
+        pkg_name = 'foo/bar'
+        lk = 'foo'
+        src_bucket = 'src-bucket'
+        src_key = 'foo.txt'
+        src_version = '1'
+        dst_bucket = 'dst-bucket'
+        dst_key = f'{pkg_name}/{lk}'
+        dst_version = '2'
+        pkg = Package()
+        with patch('quilt3.packages.get_size_and_version', return_value=(0, src_version)):
+            pkg.set(lk, f's3://{src_bucket}/{src_key}')
+
+        selector_fn = mock.MagicMock(return_value=True)
+        self.s3_stubber.add_response(
+            method='copy_object',
+            service_response={
+                'VersionId': dst_version,
+            },
+            expected_params={
+                'Bucket': dst_bucket,
+                'Key': dst_key,
+                'CopySource': {
+                    'Bucket': src_bucket,
+                    'Key': src_key,
+                    'VersionId': src_version,
+                },
+            }
+        )
+        push_manifest_mock = self.patch_s3_registry('push_manifest')
+        self.patch_s3_registry('shorten_top_hash', return_value='7a67ff4')
+        with patch('quilt3.packages.calculate_sha256', return_value=["a" * 64]):
+            pkg.push(pkg_name, registry=f's3://{dst_bucket}', selector_fn=selector_fn, force=True)
+
+        selector_fn.assert_called_once_with(lk, pkg[lk])
+        push_manifest_mock.assert_called_once_with(pkg_name, mock.sentinel.top_hash, ANY)
+        assert Package.load(
+            BytesIO(push_manifest_mock.call_args[0][2])
+        )[lk].physical_key == PhysicalKey(dst_bucket, dst_key, dst_version)
 
     def test_package_dump_file_mode(self):
         """

@@ -2,8 +2,6 @@ import dedent from 'dedent'
 
 import { extendDefaults, parse } from './BucketPreferences'
 
-const sentryMock = () => {}
-
 const expectedDefaults = {
   ui: {
     actions: {
@@ -30,10 +28,13 @@ const expectedDefaults = {
       packages: true,
       queries: true,
     },
-    package_description: {
-      '.*': {
-        message: true,
+    packageDescription: {
+      packages: {
+        '.*': {
+          message: true,
+        },
       },
+      userMetaMultiline: false,
     },
     sourceBuckets: {
       list: [],
@@ -44,7 +45,7 @@ const expectedDefaults = {
 describe('utils/BucketPreferences', () => {
   describe('parse', () => {
     test('Empty config returns default preferences', () => {
-      expect(parse('', sentryMock)).toMatchObject(expectedDefaults)
+      expect(parse('')).toMatchObject(expectedDefaults)
     })
 
     test('If one action is overwritten, others should be default', () => {
@@ -53,7 +54,7 @@ describe('utils/BucketPreferences', () => {
                 actions:
                     copyPackage: False
       `
-      expect(parse(config, sentryMock).ui.actions).toMatchObject({
+      expect(parse(config).ui.actions).toMatchObject({
         ...expectedDefaults.ui.actions,
         copyPackage: false,
       })
@@ -65,7 +66,7 @@ describe('utils/BucketPreferences', () => {
                 blocks:
                     analytics: False
       `
-      expect(parse(config, sentryMock).ui.blocks).toMatchObject({
+      expect(parse(config).ui.blocks).toMatchObject({
         ...expectedDefaults.ui.blocks,
         analytics: false,
       })
@@ -77,7 +78,7 @@ describe('utils/BucketPreferences', () => {
                 nav:
                     queries: False
       `
-      expect(parse(config, sentryMock).ui.nav).toMatchObject({
+      expect(parse(config).ui.nav).toMatchObject({
         ...expectedDefaults.ui.nav,
         queries: false,
       })
@@ -89,7 +90,7 @@ describe('utils/BucketPreferences', () => {
                 blocks:
                     queries: QUERY
       `
-      expect(parse(config, sentryMock)).toMatchObject(expectedDefaults)
+      expect(parse(config)).toMatchObject(expectedDefaults)
     })
 
     test('Invalid config values throws error', () => {
@@ -98,13 +99,13 @@ describe('utils/BucketPreferences', () => {
                 nav:
                     queries: QUERY
       `
-      expect(() => parse(config, sentryMock)).toThrowError()
+      expect(() => parse(config)).toThrowError()
     })
   })
 
   describe('extendDefaults', () => {
     test('Empty config returns default preferences', () => {
-      expect(extendDefaults({}, sentryMock)).toMatchObject(expectedDefaults)
+      expect(extendDefaults({})).toMatchObject(expectedDefaults)
     })
 
     test('If one action is overwritten, others should be default', () => {
@@ -115,7 +116,7 @@ describe('utils/BucketPreferences', () => {
           },
         },
       }
-      expect(extendDefaults(config, sentryMock).ui.actions).toMatchObject({
+      expect(extendDefaults(config).ui.actions).toMatchObject({
         ...expectedDefaults.ui.actions,
         deleteRevision: true,
       })
@@ -129,7 +130,7 @@ describe('utils/BucketPreferences', () => {
           },
         },
       }
-      expect(extendDefaults(config, sentryMock).ui.blocks).toMatchObject({
+      expect(extendDefaults(config).ui.blocks).toMatchObject({
         ...expectedDefaults.ui.blocks,
         browser: false,
       })
@@ -143,7 +144,7 @@ describe('utils/BucketPreferences', () => {
           },
         },
       }
-      expect(extendDefaults(config, sentryMock).ui.nav).toMatchObject({
+      expect(extendDefaults(config).ui.nav).toMatchObject({
         ...expectedDefaults.ui.nav,
         files: false,
       })

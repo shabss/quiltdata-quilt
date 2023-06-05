@@ -5,21 +5,22 @@ import * as R from 'ramda'
 import * as React from 'react'
 import * as RRDom from 'react-router-dom'
 import * as urql from 'urql'
-import type { ResultOf } from '@graphql-typed-document-node/core'
 import * as M from '@material-ui/core'
 import * as Lab from '@material-ui/lab'
 
-import { Crumb, copyWithoutSpaces, render as renderCrumbs } from 'components/BreadCrumbs'
+import * as BreadCrumbs from 'components/BreadCrumbs'
+import * as Buttons from 'components/Buttons'
 import * as FileEditor from 'components/FileEditor'
 import Message from 'components/Message'
 import Placeholder from 'components/Placeholder'
 import * as Preview from 'components/Preview'
+import cfg from 'constants/config'
 import * as OpenInDesktop from 'containers/OpenInDesktop'
 import AsyncResult from 'utils/AsyncResult'
 import * as AWS from 'utils/AWS'
 import * as BucketPreferences from 'utils/BucketPreferences'
-import * as Config from 'utils/Config'
 import Data from 'utils/Data'
+import * as GQL from 'utils/GraphQL'
 // import * as LinkedData from 'utils/LinkedData'
 import * as LogicalKeyResolver from 'utils/LogicalKeyResolver'
 import MetaTitle from 'utils/MetaTitle'
@@ -29,7 +30,6 @@ import assertNever from 'utils/assertNever'
 import parseSearch from 'utils/parseSearch'
 import * as s3paths from 'utils/s3paths'
 import usePrevious from 'utils/usePrevious'
-import { UseQueryResult, useQuery } from 'utils/useQuery'
 import * as workflows from 'utils/workflows'
 
 import Code from '../Code'
@@ -46,7 +46,7 @@ import WithPackagesSupport from '../WithPackagesSupport'
 import * as errors from '../errors'
 import renderPreview from '../renderPreview'
 import * as requests from '../requests'
-import { ViewMode, useViewModes, viewModeToSelectOption } from '../viewModes'
+import { FileType, useViewModes, viewModeToSelectOption } from '../viewModes'
 import PackageLink from './PackageLink'
 import RevisionDeleteDialog from './RevisionDeleteDialog'
 import RevisionInfo from './RevisionInfo'
@@ -57,30 +57,6 @@ import REVISION_LIST_QUERY from './gql/RevisionList.generated'
 import DIR_QUERY from './gql/Dir.generated'
 import FILE_QUERY from './gql/File.generated'
 import DELETE_REVISION from './gql/DeleteRevision.generated'
-
-/*
-function ExposeLinkedData({ bucketCfg, bucket, name, hash, modified }) {
-  const sign = AWS.Signer.useS3Signer()
-  const { apiGatewayEndpoint: endpoint } = Config.use()
-  const data = useData(requests.getRevisionData, {
-    sign,
-    endpoint,
-    bucket,
-    hash,
-    maxKeys: 0,
-  })
-  return data.case({
-    _: () => null,
-    Ok: ({ header }) => (
-      <React.Suspense fallback={null}>
-        <LinkedData.PackageData
-          {...{ bucket: bucketCfg, name, hash, modified, header }}
-        />
-      </React.Suspense>
-    ),
-  })
-}
-*/
 
 interface PkgCodeProps {
   bucket: string
@@ -154,24 +130,28 @@ const useTopBarStyles = M.makeStyles((t) => ({
       maxWidth: 'calc(100% - 40px)',
     },
   },
-  spacer: {
-    flexGrow: 1,
+  content: {
+    alignItems: 'center',
+    display: 'flex',
+    flexShrink: 0,
+    marginBottom: -3,
+    marginLeft: 'auto',
+    marginTop: -3,
   },
 }))
 
 interface TopBarProps {
-  crumbs: $TSFixMe[] // Crumb
+  crumbs: BreadCrumbs.Crumb[]
 }
 
 function TopBar({ crumbs, children }: React.PropsWithChildren<TopBarProps>) {
   const classes = useTopBarStyles()
   return (
     <div className={classes.topBar}>
-      <div className={classes.crumbs} onCopy={copyWithoutSpaces}>
-        {renderCrumbs(crumbs)}
+      <div className={classes.crumbs} onCopy={BreadCrumbs.copyWithoutSpaces}>
+        {BreadCrumbs.render(crumbs)}
       </div>
-      <div className={classes.spacer} />
-      {children}
+      <div className={classes.content}>{children}</div>
     </div>
   )
 }
@@ -191,7 +171,7 @@ interface DirDisplayProps {
   hash: string
   hashOrTag: string
   path: string
-  crumbs: $TSFixMe[] // Crumb
+  crumbs: BreadCrumbs.Crumb[]
   size?: number
 }
 
@@ -209,9 +189,11 @@ function DirDisplay({
   const { urls } = NamedRoutes.use()
   const classes = useDirDisplayStyles()
 
-  const dirQuery = useQuery({
-    query: DIR_QUERY,
-    variables: { bucket, name, hash, path: s3paths.ensureNoSlash(path) },
+  const dirQuery = GQL.useQuery(DIR_QUERY, {
+    bucket,
+    name,
+    hash,
+    path: s3paths.ensureNoSlash(path),
   })
 
   const mkUrl = React.useCallback(
@@ -238,7 +220,7 @@ function DirDisplay({
     if (!R.equals({ bucket, name, hashOrTag }, prev)) updateDialog.close()
   })
 
-  const { preferences } = BucketPreferences.use()
+  const prefs = BucketPreferences.use()
 
   const redirectToPackagesList = React.useCallback(() => {
     history.push(urls.bucketPackageList(bucket))
@@ -264,15 +246,12 @@ function DirDisplay({
     )
   }, [])
 
-  const [, deleteRevision] = urql.useMutation(DELETE_REVISION)
+  const deleteRevision = GQL.useMutation(DELETE_REVISION)
 
   const handlePackageDeletion = React.useCallback(async () => {
     setDeletionState(R.assoc('loading', true))
     try {
-      const res = await deleteRevision({ bucket, name, hash })
-      if (res.error) throw res.error
-      if (!res.data) throw new Error('No data returned by the API')
-      const r = res.data.packageRevisionDelete
+      const { packageRevisionDelete: r } = await deleteRevision({ bucket, name, hash })
       switch (r.__typename) {
         case 'PackageRevisionDeleteSuccess':
           setDeletionState(R.mergeLeft({ opened: false, loading: false }))
@@ -338,7 +317,7 @@ function DirDisplay({
         title: 'Push package revision',
       })}
 
-      {dirQuery.case({
+      {GQL.fold(dirQuery, {
         // TODO: skeleton placeholder
         fetching: () => (
           <>
@@ -413,62 +392,101 @@ function DirDisplay({
           const downloadPath = path
             ? `package/${bucket}/${name}/${hash}/${path}`
             : `package/${bucket}/${name}/${hash}`
-          // TODO: disable if nothing to revise on desktop
-          const hasReviseButton = preferences?.ui?.actions?.revisePackage
 
           return (
             <>
               {prompt.render()}
               <TopBar crumbs={crumbs}>
-                {hasReviseButton && (
-                  <M.Button
-                    className={classes.button}
-                    variant="contained"
-                    color="primary"
-                    size="small"
-                    style={{ marginTop: -3, marginBottom: -3, flexShrink: 0 }}
-                    onClick={() => updateDialog.open()}
-                  >
-                    Revise package
-                  </M.Button>
+                {BucketPreferences.Result.match(
+                  {
+                    Ok: ({ ui: { actions } }) => (
+                      <>
+                        {actions.revisePackage &&
+                          (actions.editPackage ? (
+                            <RRDom.Link to={urls.bucketPackageEditor(bucket, name, hash)}>
+                              <M.Button
+                                className={classes.button}
+                                variant="contained"
+                                color="primary"
+                                size="small"
+                                style={{ marginTop: -3, marginBottom: -3, flexShrink: 0 }}
+                              >
+                                Revise package
+                              </M.Button>
+                            </RRDom.Link>
+                          ) : (
+                            <M.Button
+                              className={classes.button}
+                              variant="contained"
+                              color="primary"
+                              size="small"
+                              style={{ marginTop: -3, marginBottom: -3, flexShrink: 0 }}
+                              onClick={() => updateDialog.open()}
+                            >
+                              Revise package
+                            </M.Button>
+                          ))}
+                        {actions.copyPackage && (
+                          <Successors.Button
+                            className={classes.button}
+                            bucket={bucket}
+                            onChange={setSuccessor}
+                          >
+                            Push to bucket
+                          </Successors.Button>
+                        )}
+                        <Download.DownloadButton
+                          className={classes.button}
+                          label={path ? 'Download sub-package' : 'Download package'}
+                          onClick={openInDesktopState.confirm}
+                          path={downloadPath}
+                        />
+                        <RevisionMenu
+                          className={classes.button}
+                          onDelete={confirmDelete}
+                          onDesktop={openInDesktopState.confirm}
+                          onCreateFile={prompt.open}
+                        />
+                      </>
+                    ),
+                    Pending: () => (
+                      <>
+                        <Buttons.Skeleton className={classes.button} size="small" />
+                        <Buttons.Skeleton className={classes.button} size="small" />
+                        <Buttons.Skeleton className={classes.button} size="small" />
+                        <Buttons.Skeleton className={classes.button} size="small" />
+                      </>
+                    ),
+                    Init: () => null,
+                  },
+                  prefs,
                 )}
-                {preferences?.ui?.actions?.copyPackage && (
-                  <Successors.Button
-                    className={classes.button}
-                    bucket={bucket}
-                    onChange={setSuccessor}
-                  >
-                    Push to bucket
-                  </Successors.Button>
-                )}
-                <Download.DownloadButton
-                  className={classes.button}
-                  label={path ? 'Download sub-package' : 'Download package'}
-                  onClick={openInDesktopState.confirm}
-                  path={downloadPath}
-                />
-                <RevisionMenu
-                  className={classes.button}
-                  onDelete={confirmDelete}
-                  onDesktop={openInDesktopState.confirm}
-                  onCreateFile={prompt.open}
-                />
               </TopBar>
-              {preferences?.ui?.blocks?.code && (
-                <PkgCode {...{ ...packageHandle, hashOrTag, path }} />
+              {BucketPreferences.Result.match(
+                {
+                  Ok: ({ ui: { blocks } }) => (
+                    <>
+                      {blocks.code && (
+                        <PkgCode {...{ ...packageHandle, hashOrTag, path }} />
+                      )}
+                      {blocks.meta && (
+                        <FileView.PackageMeta data={AsyncResult.Ok(dir.metadata)} />
+                      )}
+                      <M.Box mt={2}>
+                        {blocks.browser && <Listing items={items} key={hash} />}
+                        <Summary
+                          path={path}
+                          files={summaryHandles}
+                          mkUrl={mkUrl}
+                          packageHandle={packageHandle}
+                        />
+                      </M.Box>
+                    </>
+                  ),
+                  _: () => null,
+                },
+                prefs,
               )}
-              {!!preferences?.ui?.blocks?.meta && (
-                <FileView.PackageMeta data={AsyncResult.Ok(dir.metadata)} />
-              )}
-              <M.Box mt={2}>
-                {preferences?.ui?.blocks?.browser && <Listing items={items} key={hash} />}
-                <Summary
-                  path={path}
-                  files={summaryHandles}
-                  mkUrl={mkUrl}
-                  packageHandle={packageHandle}
-                />
-              </M.Box>
             </>
           )
         },
@@ -480,7 +498,7 @@ function DirDisplay({
 const withPreview = (
   { archived, deleted }: ObjectAttrs,
   handle: LogicalKeyResolver.S3SummarizeHandle,
-  mode: ViewMode | null,
+  mode: FileType | null,
   callback: (res: $TSFixMe) => JSX.Element,
 ) => {
   if (deleted) {
@@ -547,7 +565,7 @@ interface FileDisplayQueryProps {
   hash: string
   hashOrTag: string
   path: string
-  crumbs: $TSFixMe[] // Crumb
+  crumbs: BreadCrumbs.Crumb[]
   mode?: string
 }
 
@@ -559,11 +577,8 @@ function FileDisplayQuery({
   crumbs,
   ...props
 }: FileDisplayQueryProps) {
-  const fileQuery = useQuery({
-    query: FILE_QUERY,
-    variables: { bucket, name, hash, path },
-  })
-  return fileQuery.case({
+  const fileQuery = GQL.useQuery(FILE_QUERY, { bucket, name, hash, path })
+  return GQL.fold(fileQuery, {
     fetching: () => <FileDisplaySkeleton crumbs={crumbs} />,
     data: (d) => {
       const file = d.package?.revision?.file
@@ -587,12 +602,13 @@ function FileDisplayQuery({
 
 const useFileDisplayStyles = M.makeStyles((t) => ({
   button: {
-    marginLeft: t.spacing(2),
+    marginLeft: t.spacing(1),
   },
   fileProperties: {
-    [t.breakpoints.up('sm')]: {
-      marginBottom: '3px',
-    },
+    marginRight: t.spacing(1),
+  },
+  preview: {
+    width: '100%',
   },
 }))
 
@@ -611,18 +627,17 @@ function FileDisplay({
   file,
 }: FileDisplayProps) {
   const s3 = AWS.S3.use()
-  const { noDownload } = Config.use()
   const history = RRDom.useHistory()
   const { urls } = NamedRoutes.use()
   const classes = useFileDisplayStyles()
-  const { preferences } = BucketPreferences.use()
+  const prefs = BucketPreferences.use()
 
   const packageHandle = React.useMemo(
     () => ({ bucket, name, hash }),
     [bucket, name, hash],
   )
 
-  const viewModes = useViewModes(path, mode, packageHandle)
+  const viewModes = useViewModes(mode)
 
   const onViewModeChange = React.useCallback(
     (m) => {
@@ -631,10 +646,6 @@ function FileDisplay({
     [bucket, history, name, path, hashOrTag, urls],
   )
 
-  const isEditable =
-    FileEditor.isSupportedFileType(path) &&
-    hashOrTag === 'latest' &&
-    !!preferences?.ui?.actions?.revisePackage
   const handleEdit = React.useCallback(() => {
     const next = urls.bucketPackageDetail(bucket, name, { action: 'revisePackage' })
     const physicalHandle = s3paths.parseS3Url(file.physicalKey)
@@ -689,13 +700,25 @@ function FileDisplay({
                   lastModified={lastModified}
                   size={size}
                 />
-                {isEditable && (
-                  <FileView.AdaptiveButtonLayout
-                    className={classes.button}
-                    icon="edit"
-                    label="Edit"
-                    onClick={handleEdit}
-                  />
+                {BucketPreferences.Result.match(
+                  {
+                    Ok: ({ ui: { actions } }) =>
+                      FileEditor.isSupportedFileType(path) &&
+                      hashOrTag === 'latest' &&
+                      actions.revisePackage && (
+                        <Buttons.Iconized
+                          className={classes.button}
+                          icon="edit"
+                          label="Edit"
+                          onClick={handleEdit}
+                        />
+                      ),
+                    Pending: () => (
+                      <Buttons.Skeleton className={classes.button} size="small" />
+                    ),
+                    Init: () => null,
+                  },
+                  prefs,
                 )}
                 {!!viewModes.modes.length && (
                   <FileView.ViewModeSelector
@@ -707,23 +730,35 @@ function FileDisplay({
                     onChange={onViewModeChange}
                   />
                 )}
-                {!noDownload && !deleted && !archived && (
+                {!cfg.noDownload && !deleted && !archived && (
                   <FileView.DownloadButton className={classes.button} handle={handle} />
                 )}
               </TopBar>
-              {preferences?.ui?.blocks?.code && (
-                <PkgCode {...{ ...packageHandle, hashOrTag, path }} />
-              )}
-              {preferences?.ui?.blocks?.meta && (
-                <FileView.ObjectMeta data={AsyncResult.Ok(file.metadata)} />
+              {BucketPreferences.Result.match(
+                {
+                  Ok: ({ ui: { blocks } }) => (
+                    <>
+                      {blocks.code && (
+                        <PkgCode {...{ ...packageHandle, hashOrTag, path }} />
+                      )}
+                      {blocks.meta && (
+                        <FileView.ObjectMeta data={AsyncResult.Ok(file.metadata)} />
+                      )}
+                    </>
+                  ),
+                  _: () => null,
+                },
+                prefs,
               )}
               <Section icon="remove_red_eye" heading="Preview" expandable={false}>
-                {withPreview(
-                  { archived, deleted },
-                  handle,
-                  viewModes.mode,
-                  renderPreview(viewModes.handlePreviewResult),
-                )}
+                <div className={classes.preview}>
+                  {withPreview(
+                    { archived, deleted },
+                    handle,
+                    viewModes.mode,
+                    renderPreview(viewModes.handlePreviewResult),
+                  )}
+                </div>
               </Section>
             </>
           ),
@@ -790,7 +825,7 @@ interface PackageTreeProps {
   path: string
   mode?: string
   resolvedFrom?: string
-  revisionListQuery: UseQueryResult<ResultOf<typeof REVISION_LIST_QUERY>>
+  revisionListQuery: GQL.QueryResultForDoc<typeof REVISION_LIST_QUERY>
   size?: number
 }
 
@@ -809,7 +844,7 @@ function PackageTree({
   const { urls } = NamedRoutes.use()
 
   // TODO: use urql to get bucket config
-  // const [{ data }] = urql.useQuery({
+  // const data = useQuery({
   //   ..
   // })
   //
@@ -817,21 +852,13 @@ function PackageTree({
 
   const isDir = s3paths.isDir(path)
 
-  const crumbs = React.useMemo(() => {
-    const segments = [{ label: 'ROOT', path: '' }, ...s3paths.getBreadCrumbs(path)]
-    return R.intersperse(
-      Crumb.Sep(<>&nbsp;/ </>),
-      segments.map(({ label, path: segPath }) =>
-        Crumb.Segment({
-          label,
-          to:
-            path === segPath
-              ? undefined
-              : urls.bucketPackageTree(bucket, name, hashOrTag, segPath),
-        }),
-      ),
-    ).concat(path.endsWith('/') ? Crumb.Sep(<>&nbsp;/</>) : [])
-  }, [bucket, name, hashOrTag, path, urls])
+  const getSegmentRoute = React.useCallback(
+    (segPath: string) => urls.bucketPackageTree(bucket, name, hashOrTag, segPath),
+    [bucket, hashOrTag, name, urls],
+  )
+  const crumbs = BreadCrumbs.use(path, getSegmentRoute, 'ROOT', {
+    tailSeparator: path.endsWith('/'),
+  })
 
   return (
     <FileView.Root>
@@ -937,17 +964,10 @@ function PackageTreeQueries({
   resolvedFrom,
   mode,
 }: PackageTreeQueriesProps) {
-  const revisionQuery = useQuery({
-    query: REVISION_QUERY,
-    variables: { bucket, name, hashOrTag },
-  })
+  const revisionQuery = GQL.useQuery(REVISION_QUERY, { bucket, name, hashOrTag })
+  const revisionListQuery = GQL.useQuery(REVISION_LIST_QUERY, { bucket, name })
 
-  const revisionListQuery = useQuery({
-    query: REVISION_LIST_QUERY,
-    variables: { bucket, name },
-  })
-
-  return revisionQuery.case({
+  return GQL.fold(revisionQuery, {
     fetching: () => <Placeholder color="text.secondary" />,
     error: (e) => errors.displayError()(e),
     data: (d) => {

@@ -14,7 +14,7 @@ asynctest==0.13.0
     # via aiohttp
 attrs==21.4.0
     # via aiohttp
-certifi==2021.10.8
+certifi==2022.12.7
     # via requests
 charset-normalizer==2.0.12
     # via
@@ -50,7 +50,7 @@ python-dateutil==2.8.2
     # via pandas
 pytz==2021.3
     # via pandas
-requests==2.27.1
+requests==2.31.0
     # via fsspec
 six==1.16.0
     # via python-dateutil

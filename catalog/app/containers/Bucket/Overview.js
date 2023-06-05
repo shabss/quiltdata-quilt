@@ -4,27 +4,26 @@ import * as R from 'ramda'
 import * as React from 'react'
 import { Link as RRLink } from 'react-router-dom'
 import * as redux from 'react-redux'
-import * as urql from 'urql'
 import * as M from '@material-ui/core'
 import { fade } from '@material-ui/core/styles'
 import useComponentSize from '@rehooks/component-size'
 
-import * as Pagination from 'components/Pagination'
 import Skeleton from 'components/Skeleton'
 import StackedAreaChart from 'components/StackedAreaChart'
-import Thumbnail from 'components/Thumbnail'
+import cfg from 'constants/config'
 import * as authSelectors from 'containers/Auth/selectors'
 import * as APIConnector from 'utils/APIConnector'
 import * as AWS from 'utils/AWS'
 import AsyncResult from 'utils/AsyncResult'
-import * as Config from 'utils/Config'
+import * as BucketPreferences from 'utils/BucketPreferences'
 import Data, { useData } from 'utils/Data'
+import { useQueryS } from 'utils/GraphQL'
 import * as LinkedData from 'utils/LinkedData'
 import * as NamedRoutes from 'utils/NamedRoutes'
 import * as SVG from 'utils/SVG'
-import Link from 'utils/StyledLink'
 import { readableBytes, readableQuantity, formatQuantity } from 'utils/string'
 
+import * as Gallery from './Gallery'
 import * as Summarize from './Summarize'
 import * as requests from './requests'
 import BUCKET_CONFIG_QUERY from './OverviewBucketConfig.generated'
@@ -519,7 +518,6 @@ const useDownloadsStyles = M.makeStyles((t) => ({
 }))
 
 function Downloads({ bucket, colorPool, ...props }) {
-  const { analyticsBucket } = Config.useConfig()
   const s3 = AWS.S3.use()
   const today = React.useMemo(() => new Date(), [])
   const classes = useDownloadsStyles()
@@ -544,7 +542,7 @@ function Downloads({ bucket, colorPool, ...props }) {
     _: () => null,
   })
 
-  if (!analyticsBucket) {
+  if (!cfg.analyticsBucket) {
     return (
       <ChartSkel height={CHART_H} width={width}>
         <div className={classes.unavail}>Requires CloudTrail</div>
@@ -553,10 +551,7 @@ function Downloads({ bucket, colorPool, ...props }) {
   }
 
   return (
-    <Data
-      fetch={requests.bucketAccessCounts}
-      params={{ s3, analyticsBucket, bucket, today, window }}
-    >
+    <Data fetch={requests.bucketAccessCounts} params={{ s3, bucket, today, window }}>
       {(data) => (
         <M.Box className={classes.root} {...props} ref={ref}>
           <div className={classes.period}>
@@ -855,79 +850,6 @@ function Head({ s3, overviewUrl, bucket, description }) {
   )
 }
 
-const ImageGrid = M.styled(M.Box)(({ theme: t }) => ({
-  display: 'grid',
-  gridAutoRows: 'max-content',
-  gridColumnGap: t.spacing(2),
-  gridRowGap: t.spacing(2),
-  gridTemplateColumns: '1fr',
-  [t.breakpoints.up('sm')]: {
-    gridTemplateColumns: '1fr 1fr 1fr',
-  },
-  [t.breakpoints.up('md')]: {
-    gridTemplateColumns: '1fr 1fr 1fr 1fr',
-  },
-  [t.breakpoints.up('lg')]: {
-    gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr',
-  },
-}))
-
-const useThumbnailsStyles = M.makeStyles({
-  link: {
-    overflow: 'hidden',
-  },
-  img: {
-    display: 'block',
-    marginLeft: 'auto',
-    marginRight: 'auto',
-    maxWidth: '100%',
-  },
-})
-
-function Thumbnails({ images }) {
-  const classes = useThumbnailsStyles()
-  const { urls } = NamedRoutes.use()
-
-  const scrollRef = React.useRef(null)
-  const scroll = React.useCallback(
-    (prev) => {
-      if (prev && scrollRef.current) scrollRef.current.scrollIntoView()
-    },
-    [scrollRef],
-  )
-
-  const pagination = Pagination.use(images, { perPage: 25, onChange: scroll })
-
-  return (
-    <Summarize.Section
-      heading={
-        <>
-          Images ({pagination.from}&ndash;{Math.min(pagination.to, images.length)} of{' '}
-          {images.length})
-        </>
-      }
-    >
-      <div ref={scrollRef} />
-      <ImageGrid>
-        {pagination.paginated.map((i) => (
-          <Link
-            key={i.key}
-            to={urls.bucketFile(i.bucket, i.key, { version: i.version })}
-            className={classes.link}
-          >
-            <Thumbnail handle={i} className={classes.img} alt={i.key} title={i.key} />
-          </Link>
-        ))}
-      </ImageGrid>
-      {pagination.pages > 1 && (
-        <M.Box display="flex" justifyContent="flex-end" pt={2}>
-          <Pagination.Controls {...pagination} />
-        </M.Box>
-      )}
-    </Summarize.Section>
-  )
-}
-
 function Readmes({ s3, overviewUrl, bucket }) {
   return (
     <Data fetch={requests.bucketReadmes} params={{ s3, overviewUrl, bucket }}>
@@ -963,20 +885,32 @@ function Imgs({ s3, overviewUrl, inStack, bucket }) {
   return (
     <Data fetch={requests.bucketImgs} params={{ req, s3, overviewUrl, inStack, bucket }}>
       {AsyncResult.case({
-        Ok: (images) => (images.length ? <Thumbnails images={images} /> : null),
-        _: () => (
-          <Summarize.Section key="thumbs:skel" heading={<Summarize.HeadingSkel />}>
-            <ImageGrid>
-              {R.times(
-                (i) => (
-                  // eslint-disable-next-line react/no-array-index-key
-                  <Skeleton key={i} height={200} />
-                ),
-                9,
-              )}
-            </ImageGrid>
-          </Summarize.Section>
-        ),
+        Ok: (images) => (images.length ? <Gallery.Thumbnails images={images} /> : null),
+        _: () => <Gallery.Skeleton />,
+      })}
+    </Data>
+  )
+}
+
+function ThumbnailsWrapper({
+  s3,
+  overviewUrl,
+  inStack,
+  bucket,
+  preferences: galleryPrefs,
+}) {
+  if (cfg.noOverviewImages || !galleryPrefs) return null
+  if (!galleryPrefs.overview) return null
+  return (
+    <Data fetch={requests.ensureQuiltSummarizeIsPresent} params={{ s3, bucket }}>
+      {AsyncResult.case({
+        Ok: (h) =>
+          (!h || galleryPrefs.summarize) && (
+            <Imgs {...{ s3, bucket, inStack, overviewUrl }} />
+          ),
+        Err: () => <Imgs {...{ s3, bucket, inStack, overviewUrl }} />,
+        Pending: () => <Gallery.Skeleton />,
+        _: () => null,
       })}
     </Data>
   )
@@ -988,15 +922,11 @@ export default function Overview({
   },
 }) {
   const s3 = AWS.S3.use()
-  const { noOverviewImages } = Config.use()
-  const [{ data }] = urql.useQuery({
-    query: BUCKET_CONFIG_QUERY,
-    variables: { bucket },
-  })
-  const cfg = data?.bucketConfig
-  const inStack = !!cfg
-  const overviewUrl = cfg?.overviewUrl
-  const description = cfg?.description
+  const { bucketConfig } = useQueryS(BUCKET_CONFIG_QUERY, { bucket })
+  const inStack = !!bucketConfig
+  const overviewUrl = bucketConfig?.overviewUrl
+  const description = bucketConfig?.description
+  const prefs = BucketPreferences.use()
   return (
     <M.Box pb={{ xs: 0, sm: 4 }} mx={{ xs: -2, sm: 0 }} position="relative" zIndex={1}>
       {inStack && (
@@ -1004,7 +934,7 @@ export default function Overview({
           <LinkedData.BucketData bucket={bucket} />
         </React.Suspense>
       )}
-      {cfg ? (
+      {bucketConfig ? (
         <Head {...{ s3, bucket, overviewUrl, description }} />
       ) : (
         <M.Box
@@ -1017,7 +947,18 @@ export default function Overview({
         </M.Box>
       )}
       <Readmes {...{ s3, bucket, overviewUrl }} />
-      {!noOverviewImages && <Imgs {...{ s3, bucket, inStack, overviewUrl }} />}
+      {BucketPreferences.Result.match(
+        {
+          Ok: ({ ui: { blocks } }) => (
+            <ThumbnailsWrapper
+              {...{ s3, bucket, inStack, overviewUrl, preferences: blocks.gallery }}
+            />
+          ),
+          Pending: () => <Gallery.Skeleton />,
+          Init: R.F,
+        },
+        prefs,
+      )}
       <Summarize.SummaryRoot {...{ s3, bucket, inStack, overviewUrl }} />
     </M.Box>
   )

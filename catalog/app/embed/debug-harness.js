@@ -10,9 +10,8 @@ import JsonDisplay from 'components/JsonDisplay'
 import * as Layout from 'components/Layout'
 import Placeholder from 'components/Placeholder'
 import * as style from 'constants/style'
-import * as Config from 'utils/Config'
 import { createBoundary } from 'utils/ErrorBoundary'
-import * as Okta from 'utils/Okta'
+import * as OIDC from 'utils/OIDC'
 import * as Cache from 'utils/ResourceCache'
 import * as Store from 'utils/Store'
 import mkSearch from 'utils/mkSearch'
@@ -39,8 +38,10 @@ function useField(init) {
 }
 
 function Embedder() {
-  const cfg = Config.useConfig()
-  const authenticate = Okta.use({ clientId: cfg.oktaClientId, baseUrl: cfg.oktaBaseUrl })
+  const authenticate = OIDC.use({
+    provider: 'okta',
+    popupParams: 'width=400,height=600',
+  })
 
   const iframeRef = React.useRef(null)
 
@@ -90,8 +91,8 @@ function Embedder() {
   ])
 
   const getOktaCredentials = React.useCallback(async () => {
-    const token = await authenticate()
-    fields.credentials.set(JSON.stringify({ provider: 'okta', token }))
+    const code = await authenticate()
+    fields.credentials.set(JSON.stringify({ provider: 'okta', code }))
   }, [authenticate, fields.credentials.set]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const postMessage = React.useCallback(

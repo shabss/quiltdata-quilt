@@ -6,10 +6,10 @@ import * as React from 'react'
 import { useHistory } from 'react-router-dom'
 import * as M from '@material-ui/core'
 
-import { copyWithoutSpaces, render as renderCrumbs } from 'components/BreadCrumbs'
+import * as BreadCrumbs from 'components/BreadCrumbs'
+import cfg from 'constants/config'
 import * as AWS from 'utils/AWS'
 import AsyncResult from 'utils/AsyncResult'
-import * as Config from 'utils/Config'
 import { useData } from 'utils/Data'
 import * as NamedRoutes from 'utils/NamedRoutes'
 import parseSearch from 'utils/parseSearch'
@@ -23,7 +23,6 @@ import { displayError } from 'containers/Bucket/errors'
 import * as requests from 'containers/Bucket/requests'
 
 import * as EmbedConfig from './EmbedConfig'
-import getCrumbs from './getCrumbs'
 
 const formatListing = ({ urls, scope }, r) => {
   const dirs = r.dirs.map((name) => ({
@@ -65,8 +64,7 @@ export default function Dir({
   },
   location: l,
 }) {
-  const cfg = EmbedConfig.use()
-  const { noDownload } = Config.use()
+  const ecfg = EmbedConfig.use()
   const classes = useStyles()
   const { urls } = NamedRoutes.use()
   const history = useHistory()
@@ -138,14 +136,26 @@ export default function Dir({
     [history, urls, bucket, path],
   )
 
+  const scoped = ecfg.scope && path.startsWith(ecfg.scope)
+  const scopedPath = scoped ? path.substring(ecfg.scope.length) : path
+  const getSegmentRoute = React.useCallback(
+    (segPath) => urls.bucketDir(bucket, `${scoped ? ecfg.scope : ''}${segPath}`),
+    [bucket, ecfg.scope, scoped, urls],
+  )
+  const crumbs = BreadCrumbs.use(
+    scopedPath,
+    getSegmentRoute,
+    scoped ? basename(ecfg.scope) : 'ROOT',
+  )
+
   return (
     <M.Box pt={2} pb={4}>
       <M.Box display="flex" alignItems="flex-start" mb={2}>
-        <div className={classes.crumbs} onCopy={copyWithoutSpaces}>
-          {renderCrumbs(getCrumbs({ bucket, path, urls, scope: cfg.scope }))}
+        <div className={classes.crumbs} onCopy={BreadCrumbs.copyWithoutSpaces}>
+          {BreadCrumbs.render(crumbs)}
         </div>
         <M.Box flexGrow={1} />
-        {!noDownload && (
+        {!cfg.noDownload && (
           <FileView.ZipDownloadForm
             suffix={`dir/${bucket}/${path}`}
             label="Download directory"
@@ -154,7 +164,7 @@ export default function Dir({
         )}
       </M.Box>
 
-      {!cfg.hideCode && <Code gutterBottom>{code}</Code>}
+      {!ecfg.hideCode && <Code gutterBottom>{code}</Code>}
 
       {data.case({
         Err: displayError(),
@@ -164,7 +174,7 @@ export default function Dir({
 
           if (!res) return <M.CircularProgress />
 
-          const items = formatListing({ urls, scope: cfg.scope }, res)
+          const items = formatListing({ urls, scope: ecfg.scope }, res)
 
           const locked = !AsyncResult.Ok.is(x)
 

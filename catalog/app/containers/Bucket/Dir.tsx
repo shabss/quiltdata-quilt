@@ -6,13 +6,15 @@ import * as React from 'react'
 import * as RRDom from 'react-router-dom'
 import * as M from '@material-ui/core'
 
-import { Crumb, copyWithoutSpaces, render as renderCrumbs } from 'components/BreadCrumbs'
+import * as BreadCrumbs from 'components/BreadCrumbs'
+import * as Buttons from 'components/Buttons'
 import type * as DG from 'components/DataGrid'
 import * as FileEditor from 'components/FileEditor'
+import cfg from 'constants/config'
 import * as Bookmarks from 'containers/Bookmarks'
+import type * as Model from 'model'
 import AsyncResult from 'utils/AsyncResult'
 import * as AWS from 'utils/AWS'
-import * as Config from 'utils/Config'
 import { useData } from 'utils/Data'
 import MetaTitle from 'utils/MetaTitle'
 import * as NamedRoutes from 'utils/NamedRoutes'
@@ -89,8 +91,8 @@ function AddToBookmarks({
 }: AddToBookmarksProps) {
   const classes = useAddToBookmarksStyles()
   const bookmarks = Bookmarks.use()
-  const bookmarkItems: s3paths.S3HandleBase[] = React.useMemo(() => {
-    const handles: s3paths.S3HandleBase[] = []
+  const bookmarkItems: Model.S3.S3ObjectLocation[] = React.useMemo(() => {
+    const handles: Model.S3.S3ObjectLocation[] = []
     if (selection?.includes('..')) {
       handles.push({
         bucket,
@@ -145,20 +147,6 @@ interface RouteMap {
     },
   ]
 }
-
-type Urls = NamedRoutes.Urls<RouteMap>
-
-const getCrumbs = R.compose(
-  R.intersperse(Crumb.Sep(<>&nbsp;/ </>)),
-  ({ bucket, path, urls }: { bucket: string; path: string; urls: Urls }) =>
-    [{ label: bucket, path: '' }, ...s3paths.getBreadCrumbs(path)].map(
-      ({ label, path: segPath }) =>
-        Crumb.Segment({
-          label,
-          to: segPath === path ? undefined : urls.bucketDir(bucket, segPath),
-        }),
-    ),
-)
 
 function useFormattedListing(r: requests.BucketListingResult) {
   const { urls } = NamedRoutes.use<RouteMap>()
@@ -269,9 +257,18 @@ const useStyles = M.makeStyles((t) => ({
     overflowWrap: 'break-word',
   },
   button: {
+    marginLeft: t.spacing(1),
+  },
+  topbar: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    marginBottom: t.spacing(2),
+  },
+  actions: {
+    display: 'flex',
     flexShrink: 0,
     marginBottom: '-3px',
-    marginLeft: t.spacing(1),
+    marginLeft: 'auto',
     marginTop: '-3px',
   },
 }))
@@ -288,10 +285,8 @@ export default function Dir({
   location: l,
 }: RRDom.RouteComponentProps<DirParams>) {
   const classes = useStyles()
-  const { urls } = NamedRoutes.use<RouteMap>()
-  const { desktop, noDownload } = Config.use()
   const s3 = AWS.S3.use()
-  const { preferences } = BucketPreferences.use()
+  const prefs = BucketPreferences.use()
   const { prefix } = parseSearch(l.search)
   const path = s3paths.decode(encodedPath)
   const dest = path ? basename(path) : bucket
@@ -368,6 +363,13 @@ export default function Dir({
     [packageDirectoryDialog, path],
   )
 
+  const { urls } = NamedRoutes.use<RouteMap>()
+  const getSegmentRoute = React.useCallback(
+    (segPath: string) => urls.bucketDir(bucket, segPath),
+    [bucket, urls],
+  )
+  const crumbs = BreadCrumbs.use(path, getSegmentRoute, bucket)
+
   return (
     <M.Box pt={2} pb={4}>
       <MetaTitle>{[path || 'Files', bucket]}</MetaTitle>
@@ -380,31 +382,47 @@ export default function Dir({
         title: 'Create package from directory',
       })}
 
-      <M.Box display="flex" alignItems="flex-start" mb={2}>
-        <div className={classes.crumbs} onCopy={copyWithoutSpaces}>
-          {renderCrumbs(getCrumbs({ bucket, path, urls }))}
+      <div className={classes.topbar}>
+        <div className={classes.crumbs} onCopy={BreadCrumbs.copyWithoutSpaces}>
+          {BreadCrumbs.render(crumbs)}
         </div>
-        <M.Box flexGrow={1} />
-        {preferences?.ui?.actions?.createPackage && (
-          <Successors.Button
-            bucket={bucket}
-            className={classes.button}
-            onChange={openPackageCreationDialog}
-          >
-            Create package from directory
-          </Successors.Button>
-        )}
-        {!noDownload && !desktop && (
-          <FileView.ZipDownloadForm
-            className={classes.button}
-            suffix={`dir/${bucket}/${path}`}
-            label="Download directory"
-          />
-        )}
-        <DirectoryMenu className={classes.button} bucket={bucket} path={path} />
-      </M.Box>
+        <div className={classes.actions}>
+          {BucketPreferences.Result.match(
+            {
+              Ok: ({ ui: { actions } }) =>
+                actions.createPackage && (
+                  <Successors.Button
+                    bucket={bucket}
+                    className={classes.button}
+                    onChange={openPackageCreationDialog}
+                  >
+                    Create package from directory
+                  </Successors.Button>
+                ),
+              Pending: () => <Buttons.Skeleton className={classes.button} size="small" />,
+              Init: () => null,
+            },
+            prefs,
+          )}
+          {!cfg.noDownload && !cfg.desktop && (
+            <FileView.ZipDownloadForm
+              className={classes.button}
+              suffix={`dir/${bucket}/${path}`}
+              label="Download directory"
+            />
+          )}
+          <DirectoryMenu className={classes.button} bucket={bucket} path={path} />
+        </div>
+      </div>
 
-      {preferences?.ui?.blocks?.code && <Code gutterBottom>{code}</Code>}
+      {BucketPreferences.Result.match(
+        {
+          Ok: ({ ui: { blocks } }) => blocks.code && <Code gutterBottom>{code}</Code>,
+          Pending: () => null,
+          Init: () => null,
+        },
+        prefs,
+      )}
 
       {data.case({
         Err: displayError(),

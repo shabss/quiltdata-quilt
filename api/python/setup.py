@@ -49,6 +49,7 @@ setup(
         'Programming Language :: Python :: 3.8',
         'Programming Language :: Python :: 3.9',
         'Programming Language :: Python :: 3.10',
+        'Programming Language :: Python :: 3.11',
     ],
     author='quiltdata',
     author_email='contact@quiltdata.io',
@@ -74,10 +75,10 @@ setup(
             'pandas>=0.19.2',
             'pyarrow>=0.14.1',              # as of 7/5/19: linux/circleci bugs on 0.14.0
         ],
+        'anndata': ['anndata>=0.8.0'],
         'tests': [
-            'numpy>=1.14.0',                # required by pandas, but missing from its dependencies.
-            'pandas>=0.19.2',
-            'pyarrow>=0.14.1',              # as of 7/5/19: linux/circleci bugs on 0.14.0
+            'anndata!=0.9.0',
+            'quilt3[pyarrow,anndata]',
             'pytest==6.*',
             'pytest-cov',
             'coverage==6.4',
@@ -89,6 +90,8 @@ setup(
         'catalog': [
             'quilt3_local>=1,<2',
             'uvicorn>=0.15,<0.18',
+            # Workaround to reduce backtracking during `pip install quilt3[catalog]`.
+            'aiobotocore[boto3]>=2',
         ],
     },
     include_package_data=True,

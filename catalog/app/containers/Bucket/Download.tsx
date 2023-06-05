@@ -1,25 +1,25 @@
 import * as React from 'react'
 
-import * as Config from 'utils/Config'
+import cfg from 'constants/config'
 import mkStorage from 'utils/storage'
+
+import * as Buttons from 'components/Buttons'
 
 import * as FileView from './FileView'
 
 interface DownloadButtonProps {
   className: string
-  label?: string
+  label: string
   onClick: () => void
   path?: string
 }
 
 export function DownloadButton({ className, label, onClick, path }: DownloadButtonProps) {
-  const { desktop, noDownload }: { desktop: boolean; noDownload: boolean } = Config.use()
+  if (cfg.noDownload) return null
 
-  if (noDownload) return null
-
-  if (desktop) {
+  if (cfg.desktop) {
     return (
-      <FileView.AdaptiveButtonLayout
+      <Buttons.Iconized
         className={className}
         label={label}
         icon="archive"

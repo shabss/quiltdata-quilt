@@ -1,15 +1,20 @@
 import * as R from 'ramda'
+import * as Sentry from '@sentry/react'
 
 import bucketPreferencesSchema from 'schemas/bucketConfig.yml.json'
 
 import * as bucketErrors from 'containers/Bucket/errors'
 import { makeSchemaValidator } from 'utils/json-schema'
+import * as tagged from 'utils/taggedV2'
 import * as YAML from 'utils/yaml'
 
-export type SentryInstance = (command: 'captureMessage', message: string) => void
-
 export type ActionPreferences = Record<
-  'copyPackage' | 'createPackage' | 'deleteRevision' | 'openInDesktop' | 'revisePackage',
+  | 'copyPackage'
+  | 'createPackage'
+  | 'deleteRevision'
+  | 'openInDesktop'
+  | 'revisePackage'
+  | 'editPackage',
   boolean
 >
 
@@ -31,11 +36,17 @@ export interface MetaBlockPreferences {
   }
 }
 
+export type GalleryPreferences = Record<
+  'files' | 'packages' | 'overview' | 'summarize',
+  boolean
+>
+
 interface BlocksPreferencesInput {
   analytics?: boolean
   browser?: boolean
   code?: boolean
   meta?: boolean | MetaBlockPreferencesInput
+  gallery?: boolean | GalleryPreferences
 }
 
 interface BlocksPreferences {
@@ -43,6 +54,7 @@ interface BlocksPreferences {
   browser: boolean
   code: boolean
   meta: false | MetaBlockPreferences
+  gallery: false | GalleryPreferences
 }
 
 export type NavPreferences = Record<'files' | 'packages' | 'queries', boolean>
@@ -51,14 +63,18 @@ interface PackagePreferencesInput {
   message?: true
   user_meta?: ReadonlyArray<string>
 }
-interface PackagePreferences {
+export interface PackagePreferences {
   message?: true
   userMeta?: ReadonlyArray<string>
 }
 type PackagesListPreferencesInput = Record<string, PackagePreferencesInput>
-type PackagesListPreferences = Record<string, PackagePreferences>
+interface PackagesListPreferences {
+  packages: Record<string, PackagePreferences>
+  userMetaMultiline: boolean
+}
 
 type DefaultSourceBucketInput = string
+type PackageDescriptionMultiline = boolean
 type SourceBucketsInput = Record<string, null>
 
 export interface AthenaPreferencesInput {
@@ -77,6 +93,7 @@ interface UiPreferencesInput {
   defaultSourceBucket?: DefaultSourceBucketInput
   nav?: Partial<NavPreferences>
   package_description?: PackagesListPreferencesInput
+  package_description_multiline?: PackageDescriptionMultiline
   sourceBuckets?: SourceBucketsInput
 }
 
@@ -94,7 +111,7 @@ interface UiPreferences {
   athena: AthenaPreferences
   blocks: BlocksPreferences
   nav: NavPreferences
-  package_description: PackagesListPreferences
+  packageDescription: PackagesListPreferences
   sourceBuckets: SourceBuckets
 }
 
@@ -111,12 +128,20 @@ const defaultBlockMeta: MetaBlockPreferences = {
   },
 }
 
+const defaultGallery: GalleryPreferences = {
+  files: true,
+  overview: true,
+  packages: true,
+  summarize: true,
+}
+
 const defaultPreferences: BucketPreferences = {
   ui: {
     actions: {
       copyPackage: true,
       createPackage: true,
       deleteRevision: false,
+      editPackage: false,
       openInDesktop: false,
       revisePackage: true,
     },
@@ -126,16 +151,20 @@ const defaultPreferences: BucketPreferences = {
       browser: true,
       code: true,
       meta: defaultBlockMeta,
+      gallery: defaultGallery,
     },
     nav: {
       files: true,
       packages: true,
       queries: true,
     },
-    package_description: {
-      '.*': {
-        message: true,
+    packageDescription: {
+      packages: {
+        '.*': {
+          message: true,
+        },
       },
+      userMetaMultiline: false,
     },
     sourceBuckets: {
       getDefault: () => '',
@@ -167,6 +196,19 @@ function parseAthena(athena?: AthenaPreferencesInput): AthenaPreferences {
   }
 }
 
+function parseGalleryBlock(
+  gallery?: boolean | GalleryPreferences,
+): false | GalleryPreferences {
+  if (gallery === false) return false
+  if (gallery === true || gallery === undefined) return defaultGallery
+  return {
+    files: gallery.files ?? defaultGallery.files,
+    packages: gallery.packages ?? defaultGallery.packages,
+    overview: gallery.overview ?? defaultGallery.overview,
+    summarize: gallery.summarize ?? defaultGallery.summarize,
+  }
+}
+
 function parseMetaBlock(
   meta?: boolean | MetaBlockPreferencesInput,
 ): false | MetaBlockPreferences {
@@ -183,24 +225,33 @@ function parseBlocks(blocks?: BlocksPreferencesInput): BlocksPreferences {
     ...defaultPreferences.ui.blocks,
     ...blocks,
     meta: parseMetaBlock(blocks?.meta),
+    gallery: parseGalleryBlock(blocks?.gallery),
   }
 }
 
-function parsePackages(packages?: PackagesListPreferencesInput): PackagesListPreferences {
+function parsePackages(
+  packages?: PackagesListPreferencesInput,
+  userMetaMultiline: boolean = false,
+): PackagesListPreferences {
   return Object.entries(packages || {}).reduce(
-    (memo, [name, { message, user_meta }]) => ({
-      ...memo,
-      [name]: {
-        message,
-        userMeta: user_meta,
-      },
-    }),
-    defaultPreferences.ui.package_description,
+    (memo, [name, { message, user_meta }]) =>
+      R.assocPath(
+        ['packages', name],
+        {
+          message,
+          userMeta: user_meta,
+        },
+        memo,
+      ),
+    {
+      packages: defaultPreferences.ui.packageDescription.packages,
+      userMetaMultiline:
+        userMetaMultiline || defaultPreferences.ui.packageDescription.userMetaMultiline,
+    },
   )
 }
 
 function parseSourceBuckets(
-  sentry: SentryInstance,
   sourceBuckets?: SourceBucketsInput,
   defaultSourceBucketInput?: DefaultSourceBucketInput,
 ): SourceBuckets {
@@ -212,10 +263,7 @@ function parseSourceBuckets(
         const found = list.find((name) => name === defaultSourceBucket)
         if (found) return found
         // TODO: use more civilized logger, log all similar configuration errors
-        sentry(
-          'captureMessage',
-          `defaultSourceBucket ${defaultSourceBucket} is incorrect`,
-        )
+        Sentry.captureMessage(`defaultSourceBucket ${defaultSourceBucket} is incorrect`)
       }
       return list[0] || ''
     },
@@ -223,18 +271,17 @@ function parseSourceBuckets(
   }
 }
 
-export function extendDefaults(
-  data: BucketPreferencesInput,
-  sentry: SentryInstance,
-): BucketPreferences {
+export function extendDefaults(data: BucketPreferencesInput): BucketPreferences {
   return {
     ui: {
       ...R.mergeDeepRight(defaultPreferences.ui, data?.ui || {}),
       athena: parseAthena(data?.ui?.athena),
       blocks: parseBlocks(data?.ui?.blocks),
-      package_description: parsePackages(data?.ui?.package_description),
+      packageDescription: parsePackages(
+        data?.ui?.package_description,
+        data?.ui?.package_description_multiline,
+      ),
       sourceBuckets: parseSourceBuckets(
-        sentry,
         data?.ui?.sourceBuckets,
         data?.ui?.defaultSourceBucket,
       ),
@@ -242,14 +289,21 @@ export function extendDefaults(
   }
 }
 
-export function parse(
-  bucketPreferencesYaml: string,
-  sentry: SentryInstance,
-): BucketPreferences {
+export function parse(bucketPreferencesYaml: string): BucketPreferences {
   const data = YAML.parse(bucketPreferencesYaml)
   if (!data) return defaultPreferences
 
   validate(data)
 
-  return extendDefaults(data, sentry)
+  return extendDefaults(data)
 }
+
+export const Result = tagged.create('app/utils/BucketPreferences:Result' as const, {
+  // TODO: Error: (e: Error) => e,
+  Ok: (prefs: BucketPreferences) => prefs,
+  Pending: () => null,
+  Init: () => null,
+})
+
+// eslint-disable-next-line @typescript-eslint/no-redeclare
+export type Result = tagged.InstanceOf<typeof Result>

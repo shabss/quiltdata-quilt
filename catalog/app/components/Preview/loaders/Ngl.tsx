@@ -5,18 +5,21 @@ import * as R from 'ramda'
 import * as React from 'react'
 import { DecompressorRegistry } from 'ngl'
 
-import type { S3HandleBase } from 'utils/s3paths'
+import type * as Model from 'model'
 
 import { PreviewData } from '../types'
 
 import * as mol from './formatters/mol'
+import FileType from './fileType'
 import * as utils from './utils'
 
 type ResponseFile = string | Uint8Array
 
+export const FILE_TYPE = FileType.Ngl
+
 export async function parseResponse(
   file: ResponseFile,
-  handle: S3HandleBase,
+  handle: Model.S3.S3ObjectLocation,
 ): Promise<{ file: ResponseFile; ext: string; meta?: mol.MolMeta }[]> {
   const ext = extname(utils.stripCompression(handle.key)).substring(1)
   switch (ext) {
@@ -43,7 +46,7 @@ const gzipDecompress = DecompressorRegistry.get('gz')
 
 interface NglLoaderProps {
   children: (result: $TSFixMe) => React.ReactNode
-  handle: S3HandleBase
+  handle: Model.S3.S3ObjectLocation
 }
 
 export const Loader = function NglLoader({ handle, children }: NglLoaderProps) {
@@ -56,6 +59,7 @@ export const Loader = function NglLoader({ handle, children }: NglLoaderProps) {
       const files = await parseResponse(body, handle)
       return PreviewData.Ngl({
         files: files.map(({ file, ...rest }) => ({ blob: new Blob([file]), ...rest })),
+        modes: [FileType.Ngl, FileType.Text],
       })
     },
   )
