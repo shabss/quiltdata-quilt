@@ -65,7 +65,7 @@ setup(
         'requests>=2.12.4',
         'tenacity>=5.1.1',
         'tqdm>=4.32',
-        'requests-futures==1.0.0',
+        'requests-futures==1.0.1',
         'jsonschema>=3,<5',
         'importlib_metadata; python_version < "3.8"',
     ],
