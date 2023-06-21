@@ -88,7 +88,8 @@ setup(
             'git-pylint-commit-hook',
         ],
         'catalog': [
-            'quilt3_local>=1,<2',
+            # 'quilt3_local>=1,<2',
+            'quilt3_local @ git+ssh://git@github.com/shabss/quiltdata-local.git@shabss/local-env',
             'uvicorn>=0.15,<0.18',
             # Workaround to reduce backtracking during `pip install quilt3[catalog]`.
             'aiobotocore[boto3]>=2',
